@@ -145,6 +145,27 @@ def calc_langevin_random(natoms,gamma,temp,masses,dt):
         arand[i] = np.random.normal(0.0,1.0e-5*np.sqrt(2.0*kB*temp*gamma/(masses[i]*u*dt)),size=3)
     return arand
 
+def berendsen_rescale(vels, masses, temp, dt, tau_T):
+    """Rescale velocities toward target temperature temp."""
+    if tau_T <= 0 or dt <= 0:
+        raise ValueError("dt and tau_T must be positive.")
+    if temp <= 0:
+        raise ValueError("Target temperature must be positive.")
+
+    current_temp = calc_temperature(len(vels), masses, vels)
+
+    if current_temp <= 0:
+        raise ValueError("Cannot rescale velocities at zero temperature.")
+
+    scale_squared = 1.0 + (dt / tau_T) * (
+        temp / current_temp - 1.0
+    )
+
+    if scale_squared <= 0:
+        raise ValueError("Invalid scaling: increase tau_T or decrease dt.")
+
+    return vels * np.sqrt(scale_squared)
+
 
 def calc_center_of_mass(atoms,coords):
     x = np.zeros(3,dtype=np.float32)
@@ -173,15 +194,59 @@ def update_positions(coords,vels,dt):
     return coords + vels*dt
 
 
-def calc_confinement(natoms,coords,masses,rsphere,beta,temp):
-    fbym = np.zeros((natoms,3),dtype=np.float32)
+import numpy as np
+
+kB = 1.380649e-23          # J/K
+u = 1.66053906892e-27      # kg per atomic mass unit
+hartree_J = 4.359744722206e-18
+
+
+def calc_confinement(natoms, coords, masses, rsphere, beta, temp, return_energy=False):
+    """
+    xTB-style spherical log-Fermi wall centered at the origin.
+
+    Inputs:
+        coords:  Cartesian coordinates in angstrom
+        masses:  atomic masses in amu
+        rsphere: cavity radius in angstrom
+        beta:    wall steepness in angstrom^-1
+        temp:    wall-strength parameter in kelvin
+
+    Returns:
+        Accelerations in angstrom/fs^2.
+        If return_energy=True: (accelerations, wall_energy_Hartree).
+    """
+    coords = np.asarray(coords, dtype=np.float64)
+    accs = np.zeros((natoms, 3), dtype=np.float64)
+    energy_J = 0.0
+
+
     for i in range(natoms):
         r = np.linalg.norm(coords[i])
-        fexp = np.exp(beta*r)
-        term = fexp / (1.0 + fexp)
-        fbym[i] = term*coords[i]/r/masses[i]
-    return -1.0e-10*kB*temp*fbym/u
+        x = beta * (r - rsphere)
 
+        # V_i = kB*T*log(1 + exp(x)), evaluated without overflow
+        energy_J += kB * temp * np.logaddexp(0.0, x)
+
+        if r == 0.0:
+            continue
+
+        # exp(x)/(1 + exp(x)), evaluated without overflow
+        sigmoid = np.exp(-np.logaddexp(0.0, -x))
+
+        # Negative energy gradient / mass.
+        # 1e-10 converts J/angstrom/amu to angstrom/fs^2,
+        # with the amu-to-kg conversion supplied by u.
+        accs[i] = (
+            -1.0e-10 * kB * temp * beta
+            * sigmoid / (masses[i] * u)
+            * coords[i] / r
+        )
+
+    if return_energy:
+        return accs, energy_J / hartree_J
+
+    return accs
 
 def calc_metadynamics_rmsd(natoms,numbers,masses,coords,refcoords,refcount,kpush,alpha):
     fbym = np.zeros((natoms,3),dtype=np.float32)
@@ -247,11 +312,14 @@ def calc_metadynamics_rmsd(natoms,numbers,masses,coords,refcoords,refcount,kpush
 
 if __name__ == "__main__":
 
+    thermostat = "B"        # B for Berendsen and L for Langevin
+    
     charge = 0
     multi = 2
     ntime = 5000            # Number of time steps
     dt = 0.5                # Time step in fs
     temp = 300.0            # Temperature in K
+    tau_T = 100
     confining_temp = 1000   # Confining Temp in K
     gamma = 0.1             # Friction coefficient in 1/fs
     rsphere = 2.5           # radius of confining sphere in A
@@ -261,9 +329,9 @@ if __name__ == "__main__":
     kpush = 0.2             # Height of Gaussian in Hartree, this is not converted to SI units for reasons of convenience
     alpha = 0.7             # Width of Gaussian in Bohr^{-2}, this is not converted to A for reasons of convenience
     functional = "XTB"
-    pals = "16"
-    #orca_path = "/usr/qc/ORCA6/orca_6_1_1_linux_x86-64_shared_openmpi418/"
-    orca_path = "/Applic.HPC/Easybuild/zen4/2023b/software/ORCA/6.0.1-gompi-2023b-avx2/bin/"
+    pals = "8"
+    orca_path = "/usr/qc/ORCA6/orca_6_1_1_linux_x86-64_shared_openmpi418/"
+    #orca_path = "/Applic.HPC/Easybuild/zen4/2023b/software/ORCA/6.0.1-gompi-2023b-avx2/bin/"
 
 
     atoms,numbers,masses,coords = read_xyz("ec_li.xyz")
@@ -299,13 +367,22 @@ if __name__ == "__main__":
         elapsed_orca = time.perf_counter() - start_orca
         subprocess.call("cp -a orca.gbw orca_pre.gbw",shell=True)
         forces = read_orca_gradients(natoms)    # Conservative forces, add wall potential, MTD forces
-        accs = get_acceleration(forces,masses) \
-             + calc_langevin_friction(natoms,gamma,vels) \
-             + calc_langevin_random(natoms,gamma,temp,masses,dt) \
-             + calc_confinement(natoms,coords,masses,rsphere,beta,confining_temp) \
-             + calc_metadynamics_rmsd(natoms,numbers,masses,coords,refcoords,refcount,kpush,alpha)
+        if thermostat == "L":
+            accs = get_acceleration(forces,masses) \
+                + calc_langevin_friction(natoms,gamma,vels) \
+                + calc_langevin_random(natoms,gamma,temp,masses,dt) \
+                + calc_confinement(natoms,coords,masses,rsphere,beta,confining_temp) \
+                + calc_metadynamics_rmsd(natoms,numbers,masses,coords,refcoords,refcount,kpush,alpha)
+            vels = update_velocities(vels,accs,dt)
+        else:
+            accs = get_acceleration(forces,masses) \
+                + calc_confinement(natoms,coords,masses,rsphere,beta,confining_temp) \
+                + calc_metadynamics_rmsd(natoms,numbers,masses,coords,refcoords,refcount,kpush,alpha)
+            vels = update_velocities(vels,accs,dt)
+            vels = berendsen_rescale(vels, masses, temp, dt, tau_T=100.0)
+
         # 4. Update half-step velocities
-        vels = update_velocities(vels,accs,dt)
+        #vels = update_velocities(vels,accs,dt)
         # Print stuff
         append_xyz("trajectory",atoms,coords)
         elapsed = time.perf_counter() - start
