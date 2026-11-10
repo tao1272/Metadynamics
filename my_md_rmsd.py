@@ -1,17 +1,20 @@
+import os
+ncores = 1
+
+os.environ["OMP_NUM_THREADS"] = f"{ncores},1"
+os.environ["OMP_MAX_ACTIVE_LEVELS"] = "1"
+os.environ["MKL_NUM_THREADS"] = str(ncores)
+os.environ["OPENBLAS_NUM_THREADS"] = str(ncores)
+
 
 import subprocess
 import numpy as np
 import time
 from xtb.interface import Calculator, Param
 from xtb.libxtb import VERBOSITY_MUTED
-import os
 
-ncores = 16
 
-os.environ["OMP_NUM_THREADS"] = f"{ncores},1"
-os.environ["OMP_MAX_ACTIVE_LEVELS"] = "1"
-os.environ["MKL_NUM_THREADS"] = str(ncores)
-os.environ["OPENBLAS_NUM_THREADS"] = str(ncores)
+
 #from spyrmsd import rmsd
 
 
@@ -411,8 +414,8 @@ if __name__ == "__main__":
             accs = get_acceleration(forces,masses) \
                 + calc_langevin_friction(natoms,gamma,vels) \
                 + calc_langevin_random(natoms,gamma,temp,masses,dt) \
-                + calc_confinement(natoms,coords,masses,rsphere,beta,confining_temp) \
-                + calc_metadynamics_rmsd(natoms,numbers,masses,coords,refcoords,refcount,kpush,alpha)
+                + calc_confinement(natoms,coords,masses,rsphere,beta,confining_temp) #\
+                #+ calc_metadynamics_rmsd(natoms,numbers,masses,coords,refcoords,refcount,kpush,alpha)
             vels = update_velocities(vels,accs,dt)
         else:
             accs = get_acceleration(forces,masses) \
