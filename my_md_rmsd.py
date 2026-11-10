@@ -326,18 +326,32 @@ def calc_metadynamics_rmsd(natoms,numbers,masses,coords,refcoords,refcount,kpush
         U[2,0] = 2.0*( q[1]*q[3] - q[0]*q[2] )
         U[1,2] = 2.0*( q[2]*q[3] - q[0]*q[1] )
         U[2,1] = 2.0*( q[2]*q[3] + q[0]*q[1] )
-        for j in range(natoms):
-            fbym[j] += fac * ( x[j] - (U.T).dot(y[j]) ) / masses[j]  # Normalization is added below and RMSD value cancels
+        # for j in range(natoms):
+        #     fbym[j] += fac * ( x[j] - (U.T).dot(y[j]) ) / masses[j]  # Normalization is added below and RMSD value cancels
+
+        delta = x - y @ U
+
+        rmsd2_bohr = np.sum(delta * delta) / (
+            natoms * BOHR_TO_ANGSTROM**2
+        )
+
+        gaussian = np.exp(-alpha * rmsd2_bohr)
+        fbym += fac * gaussian * delta / masses[:, None]
 
     # Convert atomic units (force by mass) to A/fs**2, furthermore, convert A in gradient to Bohr to match units of alpha
     # Units are all over the place, fix it!
     #print(0.496147525704*2.0*alpha*kpush*fbym/natoms/0.529177)
-    return 0.496147525704*2.0*alpha*kpush*fbym/natoms/0.529177
+    #return 0.496147525704*2.0*alpha*kpush*fbym/natoms/0.529177
+    return (
+        0.496147525704 * 2.0 * alpha * kpush
+        / (natoms * BOHR_TO_ANGSTROM)
+        * fbym
+    )
 
 
 if __name__ == "__main__":
 
-    thermostat = "L"        # B for Berendsen and L for Langevin
+    thermostat = "B"        # B for Berendsen and L for Langevin
     
     charge = 0
     multi = 2
@@ -347,11 +361,11 @@ if __name__ == "__main__":
     tau_T = 100
     confining_temp = 1000   # Confining Temp in K
     gamma = 0.1             # Friction coefficient in 1/fs
-    rsphere = 2.5           # radius of confining sphere in A
+    rsphere = 3.0           # radius of confining sphere in A
     beta = 6.0 / 0.529177   # steepness of confining potential, converted form Bohrs (xtb) to A
     tau = 200               # Add Metadynamics reference structure each n-th step
     save = 100              # Maximum images for Metadynamics
-    kpush = 0.2             # Height of Gaussian in Hartree, this is not converted to SI units for reasons of convenience
+    kpush = 0.3             # Height of Gaussian in Hartree, this is not converted to SI units for reasons of convenience
     alpha = 0.7             # Width of Gaussian in Bohr^{-2}, this is not converted to A for reasons of convenience
     functional = "XTB"
     pals = "8"
@@ -414,8 +428,8 @@ if __name__ == "__main__":
             accs = get_acceleration(forces,masses) \
                 + calc_langevin_friction(natoms,gamma,vels) \
                 + calc_langevin_random(natoms,gamma,temp,masses,dt) \
-                + calc_confinement(natoms,coords,masses,rsphere,beta,confining_temp) #\
-                #+ calc_metadynamics_rmsd(natoms,numbers,masses,coords,refcoords,refcount,kpush,alpha)
+                + calc_confinement(natoms,coords,masses,rsphere,beta,confining_temp) \
+                + calc_metadynamics_rmsd(natoms,numbers,masses,coords,refcoords,refcount,kpush,alpha)
             vels = update_velocities(vels,accs,dt)
         else:
             accs = get_acceleration(forces,masses) \
