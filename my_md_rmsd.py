@@ -2,11 +2,23 @@
 import subprocess
 import numpy as np
 import time
+from xtb.interface import Calculator, Param
+from xtb.libxtb import VERBOSITY_MUTED
+import os
+
+ncores = 16
+
+os.environ["OMP_NUM_THREADS"] = f"{ncores},1"
+os.environ["OMP_MAX_ACTIVE_LEVELS"] = "1"
+os.environ["MKL_NUM_THREADS"] = str(ncores)
+os.environ["OPENBLAS_NUM_THREADS"] = str(ncores)
 #from spyrmsd import rmsd
 
 
-kB = 1.380649e-23
-u = 1.66053906892e-27
+kB = 1.380649e-23          # J/K
+u = 1.66053906892e-27   # kg per atomic mass unit
+BOHR_TO_ANGSTROM = 0.529177210903
+hartree_J = 4.359744722206e-18
 
 
 atomic_number = {'H': 1, 'Li': 3, 'B': 5, 'C': 6, 'N': 7, 'O': 8, 'F': 9, 'Si': 14, 'P': 15, 'S': 16, 'Cl': 17, 'Br': 35, 'I': 53}
@@ -121,6 +133,20 @@ def write_orca_input(charge,multi,pals,functional,atoms,coords):
     f.close()
 
 
+def calc_xtb_gradients(coords,calc, previous_result=None):
+    
+    """Coordinates in angstrom; gradient returned in Hartree/bohr."""
+    calc.update(
+        np.asarray(coords, dtype=np.float64) / BOHR_TO_ANGSTROM
+    )
+   
+
+    result = calc.singlepoint(previous_result)
+
+    energy = result.get_energy()       # Hartree
+    gradients = result.get_gradient()    # Hartree/bohr; shape (natoms, 3)
+    return -gradients, result
+
 def calc_temperature(natoms,masses,vels):
     s = 0.0
     for i in range(natoms):
@@ -194,11 +220,7 @@ def update_positions(coords,vels,dt):
     return coords + vels*dt
 
 
-import numpy as np
 
-kB = 1.380649e-23          # J/K
-u = 1.66053906892e-27      # kg per atomic mass unit
-hartree_J = 4.359744722206e-18
 
 
 def calc_confinement(natoms, coords, masses, rsphere, beta, temp, return_energy=False):
@@ -312,7 +334,7 @@ def calc_metadynamics_rmsd(natoms,numbers,masses,coords,refcoords,refcount,kpush
 
 if __name__ == "__main__":
 
-    thermostat = "B"        # B for Berendsen and L for Langevin
+    thermostat = "L"        # B for Berendsen and L for Langevin
     
     charge = 0
     multi = 2
@@ -340,10 +362,26 @@ if __name__ == "__main__":
     refcoords = np.empty((0,natoms,3),dtype=np.float32)
     refcount = np.empty(0,dtype=np.int32)
     vels = get_initial_velocities(natoms,masses,temp)
-    write_initial_orca_input(charge,multi,pals,functional,atoms,coords)
-    subprocess.call(orca_path+"orca orca.inp > orca.out",shell=True)
-    subprocess.call("cp -a orca.gbw orca_pre.gbw",shell=True)
-    forces = read_orca_gradients(natoms)
+
+    # Setup Calculator XTB
+    
+    calc = Calculator(
+                Param.GFN2xTB,
+                np.asarray(numbers, dtype=np.int32),
+                np.asarray(coords, dtype=np.float64) / BOHR_TO_ANGSTROM,
+                charge=float(charge),
+                uhf=int(multi - 1),  # Doublet → one unpaired electron
+            )
+    calc.set_verbosity(VERBOSITY_MUTED)
+    calc.set_accuracy(1.0)
+    calc.set_electronic_temperature(6000.0)
+    
+    #write_initial_orca_input(charge,multi,pals,functional,atoms,coords)
+    #subprocess.call(orca_path+"orca orca.inp > orca.out",shell=True)
+    #subprocess.call("cp -a orca.gbw orca_pre.gbw",shell=True)
+    #forces = read_orca_gradients(natoms)
+    forces, result = calc_xtb_gradients(coords,calc)
+
     accs = get_acceleration(forces,masses)
     write_xyz("trajectory",atoms,coords)
     print('T_init = ',calc_temperature(natoms,masses,vels))
@@ -361,12 +399,14 @@ if __name__ == "__main__":
         # 2. Update positions
         coords = update_positions(coords,vels,dt)
         # 3. Calculate new forces & accelerations
-        write_orca_input(charge,multi,pals,functional,atoms,coords)
+        # write_orca_input(charge,multi,pals,functional,atoms,coords)
         start_orca = time.perf_counter()
-        subprocess.call(orca_path+"orca orca.inp > orca.out",shell=True)
+        # subprocess.call(orca_path+"orca orca.inp > orca.out",shell=True)
+        
+        # subprocess.call("cp -a orca.gbw orca_pre.gbw",shell=True)
+        # forces = read_orca_gradients(natoms)    # Conservative forces, add wall potential, MTD forces
+        forces, result = calc_xtb_gradients(coords,calc,result)
         elapsed_orca = time.perf_counter() - start_orca
-        subprocess.call("cp -a orca.gbw orca_pre.gbw",shell=True)
-        forces = read_orca_gradients(natoms)    # Conservative forces, add wall potential, MTD forces
         if thermostat == "L":
             accs = get_acceleration(forces,masses) \
                 + calc_langevin_friction(natoms,gamma,vels) \
