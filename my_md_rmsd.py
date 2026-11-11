@@ -277,15 +277,17 @@ def calc_confinement(natoms, coords, masses, rsphere, beta, temp, return_energy=
 
     return accs
 
-def calc_metadynamics_rmsd(natoms,numbers,masses,coords,refcoords,refcount,kpush,alpha,exclude_atom):
+def calc_metadynamics_rmsd(natoms,numbers,masses,coords,refcoords,refcount,kpush,alpha,exclude_atom,refcoords_perm,kpush_perm,alpha_perm):
     if len(exclude_atom) > 0:
         natoms -= len(exclude_atom)
         for ex in exclude_atom:
             masses = np.delete(masses,ex)
             coords = np.delete(coords,ex,axis=0)
             refcoords = np.delete(refcoords,ex,axis=1)
+            refcoords_perm = np.delete(refcoords_perm,ex,axis=1)
 
     fbym = np.zeros((natoms,3),dtype=np.float32)
+    acc = np.zeros((natoms, 3),dtype=np.float32)
 
     # Remove translational degrees of freedom for current coordinates
     x = coords[:] - calc_center_of_interaction(coords[:])
@@ -348,13 +350,68 @@ def calc_metadynamics_rmsd(natoms,numbers,masses,coords,refcoords,refcount,kpush
 
         gaussian = np.exp(-alpha * rmsd2_bohr)
         fbym += fac * gaussian * delta / masses[:, None]
-        acc = (0.496147525704 * 2.0 * alpha * kpush / (natoms * BOHR_TO_ANGSTROM)) * fbym
+    acc = (0.496147525704 * 2.0 * alpha * kpush / (natoms * BOHR_TO_ANGSTROM)) * fbym
+    fbym = np.zeros((natoms,3),dtype=np.float32)
+    for i in range(len(refcoords_perm)):
+        # No Scaling factor for permanent refcoords
+        #fac = 2.0 / ( 1.0 + np.exp(-0.03*refcount[i]) ) - 1.0
 
-        
-    # Convert atomic units (force by mass) to A/fs**2, furthermore, convert A in gradient to Bohr to match units of alpha
-    # Units are all over the place, fix it!
-    #print(0.496147525704*2.0*alpha*kpush*fbym/natoms/0.529177)
-    #return 0.496147525704*2.0*alpha*kpush*fbym/natoms/0.529177
+        # Remove translational degrees of freedom for reference coordinates
+        y = refcoords_perm[i][:] - calc_center_of_interaction(refcoords_perm[i][:])
+        #val2 = rmsd.rmsd(x,y,numbers,numbers,True,True,1e-9)
+
+        # Correlation matrix
+        R = np.zeros((3,3),dtype=np.float32)
+        for j in range(natoms):
+            R += np.outer(x[j],y[j])
+
+        # Quaternion matrix
+        F = np.zeros((4,4),dtype=np.float32)
+        # Diagonal elements
+        F[0,0] = R[0,0] + R[1,1] + R[2,2]
+        F[1,1] = R[0,0] - R[1,1] - R[2,2]
+        F[2,2] = -R[0,0] + R[1,1] - R[2,2]
+        F[3,3] = -R[0,0] - R[1,1] + R[2,2]
+        # Off-diagonal elements
+        F[0,1] = F[1,0] = R[1,2] - R[2,1]
+        F[0,2] = F[2,0] = R[2,0] - R[0,2]
+        F[0,3] = F[3,0] = R[0,1] - R[1,0]
+        F[1,2] = F[2,1] = R[0,1] + R[1,0]
+        F[1,3] = F[3,1] = R[0,2] + R[2,0]
+        F[2,3] = F[3,2] = R[1,2] + R[2,1]
+        # Determine largest eigenvalue and corresponding eigenvector for rotation matrix
+        eigenvalues,eigenvectors = np.linalg.eig(F)
+        lmax = np.max(eigenvalues)
+        imax = np.argmax(eigenvalues)
+        RMSD = np.sqrt( ( np.sum(x*x) + np.sum(y*y) - 2.0*lmax )/ natoms )
+        q = eigenvectors[:,imax]
+
+        # Calculate rotation matrix
+        U = np.zeros((3,3),dtype=np.float32)
+        # Diagonal elements
+        U[0,0] = q[0]**2 + q[1]**2 - q[2]**2 - q[3]**2
+        U[1,1] = q[0]**2 - q[1]**2 + q[2]**2 - q[3]**2
+        U[2,2] = q[0]**2 - q[1]**2 - q[2]**2 + q[3]**2
+        # Off-diagonal elements
+        U[0,1] = 2.0*( q[1]*q[2] - q[0]*q[3] )
+        U[1,0] = 2.0*( q[1]*q[2] + q[0]*q[3] )
+        U[0,2] = 2.0*( q[1]*q[3] + q[0]*q[2] )
+        U[2,0] = 2.0*( q[1]*q[3] - q[0]*q[2] )
+        U[1,2] = 2.0*( q[2]*q[3] - q[0]*q[1] )
+        U[2,1] = 2.0*( q[2]*q[3] + q[0]*q[1] )
+        # for j in range(natoms):
+        #     fbym[j] += fac * ( x[j] - (U.T).dot(y[j]) ) / masses[j]  # Normalization is added below and RMSD value cancels
+
+        delta = x - y @ U
+
+        rmsd2_bohr = np.sum(delta * delta) / (
+            natoms * BOHR_TO_ANGSTROM**2
+        )
+
+        gaussian = np.exp(-alpha_perm * rmsd2_bohr)
+        fbym += gaussian * delta / masses[:, None]
+    acc += (0.496147525704 * 2.0 * alpha_perm * kpush_perm / (natoms * BOHR_TO_ANGSTROM)) * fbym
+  
     if len(exclude_atom) > 0:
                 for ex in exclude_atom:
                     acc = np.insert(acc, ex,np.array([[float(0),float(0),float(0)]]),axis=0)
@@ -384,7 +441,9 @@ if __name__ == "__main__":
     kpush = 0.3                 # Height of Gaussian in Hartree, this is not converted to SI units for reasons of convenience
     alpha = 0.7                 # Width of Gaussian in Bohr^{-2}, this is not converted to A for reasons of convenience
     exclude_atom = [10]         # list of atom numbers excluded in RMSD potential (0 for the first atom)
-    refcoords_xyz = ""
+    refcoords_xyz = ["fb_0.xyz"]
+    kpush_perm = 0.5
+    alpha_perm = 0.7
 
     grad_calc = "XTB"              # gradient calculator ("ORCA" or "XTB")
     functional = "XTB"
@@ -395,6 +454,12 @@ if __name__ == "__main__":
     start_program = time.perf_counter()
     atoms,numbers,masses,coords = read_xyz("ec_li.xyz")
     natoms = len(atoms)
+    refcoords_perm = np.empty((0,natoms,3),dtype=np.float32)
+    for xyz in refcoords_xyz:
+        _, _, _, coord = read_xyz(xyz)
+        refcoords_perm = np.append(refcoords_perm, np.array([coord]),axis=0)
+
+    print(refcoords_perm)
     coords -= calc_center_of_mass(atoms,coords)
     refcoords = np.empty((0,natoms,3),dtype=np.float32)
     refcount = np.empty(0,dtype=np.int32)
@@ -454,12 +519,12 @@ if __name__ == "__main__":
                 + calc_langevin_friction(natoms,gamma,vels) \
                 + calc_langevin_random(natoms,gamma,temp,masses,dt) \
                 + calc_confinement(natoms,coords,masses,rsphere,beta,confining_temp) \
-                + calc_metadynamics_rmsd(natoms,numbers,masses,coords,refcoords,refcount,kpush,alpha,exclude_atom)
+                + calc_metadynamics_rmsd(natoms,numbers,masses,coords,refcoords,refcount,kpush,alpha,exclude_atom,refcoords_perm,kpush_perm,alpha_perm)
             vels = update_velocities(vels,accs,dt)
         else:
             accs = get_acceleration(forces,masses) \
                 + calc_confinement(natoms,coords,masses,rsphere,beta,confining_temp) \
-                + calc_metadynamics_rmsd(natoms,numbers,masses,coords,refcoords,refcount,kpush,alpha,exclude_atom)
+                + calc_metadynamics_rmsd(natoms,numbers,masses,coords,refcoords,refcount,kpush,alpha,exclude_atom,refcoords_perm,kpush_perm,alpha_perm)
             vels = update_velocities(vels,accs,dt)
             vels = berendsen_rescale(vels, masses, temp, dt, tau_T=100.0)
 
