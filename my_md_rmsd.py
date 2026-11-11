@@ -6,12 +6,13 @@ os.environ["OMP_MAX_ACTIVE_LEVELS"] = "1"
 os.environ["MKL_NUM_THREADS"] = "1"
 os.environ["OPENBLAS_NUM_THREADS"] = "1"
 
+import subprocess
 import numpy as np
 import time
 from xtb.interface import Calculator, Param
 from xtb.libxtb import VERBOSITY_MUTED
 from threadpoolctl import ThreadpoolController
-from sprint_metadynamics import SPRINTMetadynamics
+
 
 # Create after importing NumPy and xTB.
 thread_controller = ThreadpoolController()
@@ -146,18 +147,10 @@ def calc_xtb_gradients(coords,calc, step, previous_result=None):
     calc.update(
         np.asarray(coords, dtype=np.float64) / BOHR_TO_ANGSTROM
     )
-   
-
     with thread_controller.limit(limits=XTB_CORES):
         result = calc.singlepoint(previous_result)
-
     energy = result.get_energy()       # Hartree
     forces = -result.get_gradient()    # Hartree/bohr; shape (natoms, 3)
-
-    E_bias, F_bias, S = sprint_mtd(coords, step=step)
-
-    forces += F_bias
-
 
     return forces, result
 
@@ -372,29 +365,30 @@ if __name__ == "__main__":
 
     thermostat = "B"        # B for Berendsen and L for Langevin
     
-    charge = 0
-    multi = 2
-    ntime = 20000            # Number of time steps
+    charge = 0                  # Charge
+    multi = 2                   # Multiplicity
+    ntime = 20000               # Number of time steps
     dump = 100
-    dt = 0.5                # Time step in fs
+    dt = 0.5                    # Time step in fs
 
-    temp = 300.0            # Temperature in K
-    tau_T = 100             # Berendsen Thermostat
+    temp = 300.0                # Temperature in K
+    tau_T = 100                 # Berendsen Thermostat
 
-    confining_temp = 1000   # Confining Temp in K
-    gamma = 0.1             # Friction coefficient in 1/fs
-    rsphere = 2.0           # radius of confining sphere in A
-    beta = 6.0 / 0.529177   # steepness of confining potential, converted form Bohrs (xtb) to A
+    confining_temp = 1000       # Confining Temp in K
+    gamma = 0.1                 # Friction coefficient in 1/fs
+    rsphere = 2.0               # radius of confining sphere in A
+    beta = 6.0 / 0.529177       # steepness of confining potential, converted form Bohrs (xtb) to A
 
-    tau = 2000               # Add Metadynamics reference structure each n-th step
-    save = 20              # Maximum images for Metadynamics
-    kpush = 0.5             # Height of Gaussian in Hartree, this is not converted to SI units for reasons of convenience
-    alpha = 0.7             # Width of Gaussian in Bohr^{-2}, this is not converted to A for reasons of convenience
-    exclude_atom = [10]       # list of atom numbers excluded in RMSD potential (0 for the first atom)
+    tau = 2000                  # Add Metadynamics reference structure each n-th step
+    save = 20                   # Maximum images for Metadynamics
+    kpush = 0.3                 # Height of Gaussian in Hartree, this is not converted to SI units for reasons of convenience
+    alpha = 0.7                 # Width of Gaussian in Bohr^{-2}, this is not converted to A for reasons of convenience
+    exclude_atom = [10]         # list of atom numbers excluded in RMSD potential (0 for the first atom)
+    refcoords_xyz = ""
 
-
+    grad_calc = "XTB"              # gradient calculator ("ORCA" or "XTB")
     functional = "XTB"
-    pals = "8"
+    pals = "4"
     orca_path = "/usr/qc/ORCA6/orca_6_1_1_linux_x86-64_shared_openmpi418/"
     #orca_path = "/Applic.HPC/Easybuild/zen4/2023b/software/ORCA/6.0.1-gompi-2023b-avx2/bin/"
     
@@ -405,50 +399,33 @@ if __name__ == "__main__":
     refcoords = np.empty((0,natoms,3),dtype=np.float32)
     refcount = np.empty(0,dtype=np.int32)
     vels = get_initial_velocities(natoms,masses,temp)
-
-    # Covalent radii in Å.
-    rcov = {"H": 0.31, "C": 0.76, "O": 0.66, "Li": 1.28}
-
-    # Illustrative switching distances; adjust for your system.
-    r0_pairs = {
-        (a, b): 1.2 * (rcov[a] + rcov[b])
-        for a in set(atoms)
-        for b in set(atoms)
-    }
-
-    sprint_mtd = SPRINTMetadynamics(
-        atoms=atoms,
-        r0=r0_pairs,
-        height=1e-4,     # Gaussian height in Hartree
-        sigma=0.1,       # Gaussian standard deviation in SPRINT units
-        pace=500,        # Deposit every 500 MD steps
-    )
-
-
     elapsed_orca = 0
-    # Setup Calculator XTB
-    
-    calc = Calculator(
-                Param.GFN2xTB,
-                np.asarray(numbers, dtype=np.int32),
-                np.asarray(coords, dtype=np.float64) / BOHR_TO_ANGSTROM,
-                charge=float(charge),
-                uhf=int(multi - 1),  # Doublet → one unpaired electron
-            )
-    calc.set_verbosity(VERBOSITY_MUTED)
-    calc.set_accuracy(1.0)
-    calc.set_electronic_temperature(6000.0)
-    
-    #write_initial_orca_input(charge,multi,pals,functional,atoms,coords)
-    #subprocess.call(orca_path+"orca orca.inp > orca.out",shell=True)
-    #subprocess.call("cp -a orca.gbw orca_pre.gbw",shell=True)
-    #forces = read_orca_gradients(natoms)
-    forces, result = calc_xtb_gradients(coords,calc,0)
 
+    # Gradient Calculation
+    if grad_calc == "XTB":
+        calc = Calculator(
+                    Param.GFN2xTB,
+                    np.asarray(numbers, dtype=np.int32),
+                    np.asarray(coords, dtype=np.float64) / BOHR_TO_ANGSTROM,
+                    charge=float(charge),
+                    uhf=int(multi - 1),  # Doublet → one unpaired electron
+                )
+        calc.set_verbosity(VERBOSITY_MUTED)
+        calc.set_accuracy(1.0)
+        calc.set_electronic_temperature(6000.0)
+        forces, result = calc_xtb_gradients(coords,calc,0)
+    if grad_calc == "ORCA":
+        write_initial_orca_input(charge,multi,pals,functional,atoms,coords)
+        subprocess.call(orca_path+"orca orca.inp > orca.out",shell=True)
+        subprocess.call("cp -a orca.gbw orca_pre.gbw",shell=True)
+        forces = read_orca_gradients(natoms)
+   
     accs = get_acceleration(forces,masses)
     write_xyz("trajectory",atoms,coords)
     print('T_init = ',calc_temperature(natoms,masses,vels))
     start = time.perf_counter()
+
+    # MD loop
     for t in range(ntime):
         if t % tau == 0:
             while len(refcoords) >= save:
@@ -461,14 +438,17 @@ if __name__ == "__main__":
         # 2. Update positions
         coords = update_positions(coords,vels,dt)
         # 3. Calculate new forces & accelerations
-        # write_orca_input(charge,multi,pals,functional,atoms,coords)
         start_orca = time.perf_counter()
-        # subprocess.call(orca_path+"orca orca.inp > orca.out",shell=True)
-        
-        # subprocess.call("cp -a orca.gbw orca_pre.gbw",shell=True)
-        # forces = read_orca_gradients(natoms)    # Conservative forces, add wall potential, MTD forces
-        forces, result = calc_xtb_gradients(coords,calc,t,result)
+        if grad_calc == "XTB":
+            forces, result = calc_xtb_gradients(coords,calc,t,result)
+        if grad_calc == "ORCA":
+            write_orca_input(charge,multi,pals,functional,atoms,coords)
+            subprocess.call(orca_path+"orca orca.inp > orca.out",shell=True)     
+            subprocess.call("cp -a orca.gbw orca_pre.gbw",shell=True)
+            forces = read_orca_gradients(natoms)
         elapsed_orca += time.perf_counter() - start_orca
+
+        # 4. Update half-step velocities
         if thermostat == "L":
             accs = get_acceleration(forces,masses) \
                 + calc_langevin_friction(natoms,gamma,vels) \
@@ -478,19 +458,15 @@ if __name__ == "__main__":
             vels = update_velocities(vels,accs,dt)
         else:
             accs = get_acceleration(forces,masses) \
-                + calc_confinement(natoms,coords,masses,rsphere,beta,confining_temp) #\
-                #+ calc_metadynamics_rmsd(natoms,numbers,masses,coords,refcoords,refcount,kpush,alpha,exclude_atom)
+                + calc_confinement(natoms,coords,masses,rsphere,beta,confining_temp) \
+                + calc_metadynamics_rmsd(natoms,numbers,masses,coords,refcoords,refcount,kpush,alpha,exclude_atom)
             vels = update_velocities(vels,accs,dt)
             vels = berendsen_rescale(vels, masses, temp, dt, tau_T=100.0)
 
-        # 4. Update half-step velocities
-        #vels = update_velocities(vels,accs,dt)
         # Print stuff
         if t % dump == 0:
             append_xyz("trajectory",atoms,coords)
             elapsed = time.perf_counter() - start
-            # print('t = ',t*dt,' fs,   T = ',calc_temperature(natoms,masses,vels),'time: ',elapsed,'seconds')
-
             print(
                 f"t = {t * dt:10.2f} fs | "
                 f"T = {calc_temperature(natoms, masses, vels):8.2f} K | "
