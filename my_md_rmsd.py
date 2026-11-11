@@ -1,17 +1,20 @@
 import os
-ncores = 1
 
-os.environ["OMP_NUM_THREADS"] = f"{ncores},1"
+# Default: one thread outside xTB calculations.
+os.environ["OMP_NUM_THREADS"] = "1"
 os.environ["OMP_MAX_ACTIVE_LEVELS"] = "1"
-os.environ["MKL_NUM_THREADS"] = str(ncores)
-os.environ["OPENBLAS_NUM_THREADS"] = str(ncores)
+os.environ["MKL_NUM_THREADS"] = "1"
+os.environ["OPENBLAS_NUM_THREADS"] = "1"
 
-
-import subprocess
 import numpy as np
 import time
 from xtb.interface import Calculator, Param
 from xtb.libxtb import VERBOSITY_MUTED
+from threadpoolctl import ThreadpoolController
+
+# Create after importing NumPy and xTB.
+thread_controller = ThreadpoolController()
+XTB_CORES = 4
 
 
 
@@ -144,7 +147,8 @@ def calc_xtb_gradients(coords,calc, previous_result=None):
     )
    
 
-    result = calc.singlepoint(previous_result)
+    with thread_controller.limit(limits=XTB_CORES):
+        result = calc.singlepoint(previous_result)
 
     energy = result.get_energy()       # Hartree
     gradients = result.get_gradient()    # Hartree/bohr; shape (natoms, 3)
@@ -346,13 +350,14 @@ def calc_metadynamics_rmsd(natoms,numbers,masses,coords,refcoords,refcount,kpush
         fbym += fac * gaussian * delta / masses[:, None]
         acc = (0.496147525704 * 2.0 * alpha * kpush / (natoms * BOHR_TO_ANGSTROM)) * fbym
 
-        if len(exclude_atom) > 0:
-            for ex in exclude_atom:
-                acc = np.insert(acc, ex,np.array([[float(0),float(0),float(0)]]),axis=0)
+        
     # Convert atomic units (force by mass) to A/fs**2, furthermore, convert A in gradient to Bohr to match units of alpha
     # Units are all over the place, fix it!
     #print(0.496147525704*2.0*alpha*kpush*fbym/natoms/0.529177)
     #return 0.496147525704*2.0*alpha*kpush*fbym/natoms/0.529177
+    if len(exclude_atom) > 0:
+                for ex in exclude_atom:
+                    acc = np.insert(acc, ex,np.array([[float(0),float(0),float(0)]]),axis=0)
     return acc
 
 
@@ -468,11 +473,15 @@ if __name__ == "__main__":
             start = time.perf_counter()
             elapsed_orca = 0
         refcount += np.ones(len(refcount),dtype=np.int32)
-    end_program = time.perf_counter()-start_program
+    program_timing = time.perf_counter()-start_program
+    hours, remainder = divmod(round(program_timing, 3), 3600)
+    minutes, seconds = divmod(remainder, 60)
+
     print(
-        f"Overall timing = {end_program:10.3f} s "
+        f"Overall timing = {int(hours):02d} h "
+        f"{int(minutes):02d} min {seconds:06.3f} s"
     )
-        
+            
         
 
 
