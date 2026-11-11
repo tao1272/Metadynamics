@@ -11,6 +11,7 @@ import time
 from xtb.interface import Calculator, Param
 from xtb.libxtb import VERBOSITY_MUTED
 from threadpoolctl import ThreadpoolController
+from sprint_metadynamics import SPRINTMetadynamics
 
 # Create after importing NumPy and xTB.
 thread_controller = ThreadpoolController()
@@ -139,7 +140,7 @@ def write_orca_input(charge,multi,pals,functional,atoms,coords):
     f.close()
 
 
-def calc_xtb_gradients(coords,calc, previous_result=None):
+def calc_xtb_gradients(coords,calc, step, previous_result=None):
     
     """Coordinates in angstrom; gradient returned in Hartree/bohr."""
     calc.update(
@@ -151,8 +152,14 @@ def calc_xtb_gradients(coords,calc, previous_result=None):
         result = calc.singlepoint(previous_result)
 
     energy = result.get_energy()       # Hartree
-    gradients = result.get_gradient()    # Hartree/bohr; shape (natoms, 3)
-    return -gradients, result
+    forces = -result.get_gradient()    # Hartree/bohr; shape (natoms, 3)
+
+    E_bias, F_bias, S = sprint_mtd(coords, step=step)
+
+    forces += F_bias
+
+
+    return forces, result
 
 def calc_temperature(natoms,masses,vels):
     s = 0.0
@@ -398,6 +405,26 @@ if __name__ == "__main__":
     refcoords = np.empty((0,natoms,3),dtype=np.float32)
     refcount = np.empty(0,dtype=np.int32)
     vels = get_initial_velocities(natoms,masses,temp)
+
+    # Covalent radii in Å.
+    rcov = {"H": 0.31, "C": 0.76, "O": 0.66, "Li": 1.28}
+
+    # Illustrative switching distances; adjust for your system.
+    r0_pairs = {
+        (a, b): 1.2 * (rcov[a] + rcov[b])
+        for a in set(atoms)
+        for b in set(atoms)
+    }
+
+    sprint_mtd = SPRINTMetadynamics(
+        atoms=atoms,
+        r0=r0_pairs,
+        height=1e-4,     # Gaussian height in Hartree
+        sigma=0.1,       # Gaussian standard deviation in SPRINT units
+        pace=500,        # Deposit every 500 MD steps
+    )
+
+
     elapsed_orca = 0
     # Setup Calculator XTB
     
@@ -416,7 +443,7 @@ if __name__ == "__main__":
     #subprocess.call(orca_path+"orca orca.inp > orca.out",shell=True)
     #subprocess.call("cp -a orca.gbw orca_pre.gbw",shell=True)
     #forces = read_orca_gradients(natoms)
-    forces, result = calc_xtb_gradients(coords,calc)
+    forces, result = calc_xtb_gradients(coords,calc,0)
 
     accs = get_acceleration(forces,masses)
     write_xyz("trajectory",atoms,coords)
@@ -440,7 +467,7 @@ if __name__ == "__main__":
         
         # subprocess.call("cp -a orca.gbw orca_pre.gbw",shell=True)
         # forces = read_orca_gradients(natoms)    # Conservative forces, add wall potential, MTD forces
-        forces, result = calc_xtb_gradients(coords,calc,result)
+        forces, result = calc_xtb_gradients(coords,calc,t,result)
         elapsed_orca += time.perf_counter() - start_orca
         if thermostat == "L":
             accs = get_acceleration(forces,masses) \
@@ -451,8 +478,8 @@ if __name__ == "__main__":
             vels = update_velocities(vels,accs,dt)
         else:
             accs = get_acceleration(forces,masses) \
-                + calc_confinement(natoms,coords,masses,rsphere,beta,confining_temp) \
-                + calc_metadynamics_rmsd(natoms,numbers,masses,coords,refcoords,refcount,kpush,alpha,exclude_atom)
+                + calc_confinement(natoms,coords,masses,rsphere,beta,confining_temp) #\
+                #+ calc_metadynamics_rmsd(natoms,numbers,masses,coords,refcoords,refcount,kpush,alpha,exclude_atom)
             vels = update_velocities(vels,accs,dt)
             vels = berendsen_rescale(vels, masses, temp, dt, tau_T=100.0)
 
