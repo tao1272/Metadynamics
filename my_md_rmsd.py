@@ -273,7 +273,14 @@ def calc_confinement(natoms, coords, masses, rsphere, beta, temp, return_energy=
 
     return accs
 
-def calc_metadynamics_rmsd(natoms,numbers,masses,coords,refcoords,refcount,kpush,alpha):
+def calc_metadynamics_rmsd(natoms,numbers,masses,coords,refcoords,refcount,kpush,alpha,exclude_atom):
+    if len(exclude_atom) > 0:
+        natoms -= len(exclude_atom)
+        for ex in exclude_atom:
+            masses = np.delete(masses,ex)
+            coords = np.delete(coords,ex,axis=0)
+            refcoords = np.delete(refcoords,ex,axis=1)
+
     fbym = np.zeros((natoms,3),dtype=np.float32)
 
     # Remove translational degrees of freedom for current coordinates
@@ -337,16 +344,16 @@ def calc_metadynamics_rmsd(natoms,numbers,masses,coords,refcoords,refcount,kpush
 
         gaussian = np.exp(-alpha * rmsd2_bohr)
         fbym += fac * gaussian * delta / masses[:, None]
+        acc = (0.496147525704 * 2.0 * alpha * kpush / (natoms * BOHR_TO_ANGSTROM)) * fbym
 
+        if len(exclude_atom) > 0:
+            for ex in exclude_atom:
+                acc = np.insert(acc, ex,np.array([[float(0),float(0),float(0)]]),axis=0)
     # Convert atomic units (force by mass) to A/fs**2, furthermore, convert A in gradient to Bohr to match units of alpha
     # Units are all over the place, fix it!
     #print(0.496147525704*2.0*alpha*kpush*fbym/natoms/0.529177)
     #return 0.496147525704*2.0*alpha*kpush*fbym/natoms/0.529177
-    return (
-        0.496147525704 * 2.0 * alpha * kpush
-        / (natoms * BOHR_TO_ANGSTROM)
-        * fbym
-    )
+    return acc
 
 
 if __name__ == "__main__":
@@ -355,31 +362,38 @@ if __name__ == "__main__":
     
     charge = 0
     multi = 2
-    ntime = 5000            # Number of time steps
+    ntime = 20000            # Number of time steps
+    dump = 100
     dt = 0.5                # Time step in fs
+
     temp = 300.0            # Temperature in K
-    tau_T = 100
+    tau_T = 100             # Berendsen Thermostat
+
     confining_temp = 1000   # Confining Temp in K
     gamma = 0.1             # Friction coefficient in 1/fs
-    rsphere = 3.0           # radius of confining sphere in A
+    rsphere = 2.0           # radius of confining sphere in A
     beta = 6.0 / 0.529177   # steepness of confining potential, converted form Bohrs (xtb) to A
-    tau = 200               # Add Metadynamics reference structure each n-th step
-    save = 100              # Maximum images for Metadynamics
-    kpush = 0.3             # Height of Gaussian in Hartree, this is not converted to SI units for reasons of convenience
+
+    tau = 2000               # Add Metadynamics reference structure each n-th step
+    save = 20              # Maximum images for Metadynamics
+    kpush = 0.5             # Height of Gaussian in Hartree, this is not converted to SI units for reasons of convenience
     alpha = 0.7             # Width of Gaussian in Bohr^{-2}, this is not converted to A for reasons of convenience
+    exclude_atom = [10]       # list of atom numbers excluded in RMSD potential (0 for the first atom)
+
+
     functional = "XTB"
     pals = "8"
     orca_path = "/usr/qc/ORCA6/orca_6_1_1_linux_x86-64_shared_openmpi418/"
     #orca_path = "/Applic.HPC/Easybuild/zen4/2023b/software/ORCA/6.0.1-gompi-2023b-avx2/bin/"
-
-
+    
+    start_program = time.perf_counter()
     atoms,numbers,masses,coords = read_xyz("ec_li.xyz")
     natoms = len(atoms)
     coords -= calc_center_of_mass(atoms,coords)
     refcoords = np.empty((0,natoms,3),dtype=np.float32)
     refcount = np.empty(0,dtype=np.int32)
     vels = get_initial_velocities(natoms,masses,temp)
-
+    elapsed_orca = 0
     # Setup Calculator XTB
     
     calc = Calculator(
@@ -402,9 +416,8 @@ if __name__ == "__main__":
     accs = get_acceleration(forces,masses)
     write_xyz("trajectory",atoms,coords)
     print('T_init = ',calc_temperature(natoms,masses,vels))
-
+    start = time.perf_counter()
     for t in range(ntime):
-        start = time.perf_counter()
         if t % tau == 0:
             while len(refcoords) >= save:
                 refcoords = np.delete(refcoords,0,axis=0)
@@ -423,34 +436,42 @@ if __name__ == "__main__":
         # subprocess.call("cp -a orca.gbw orca_pre.gbw",shell=True)
         # forces = read_orca_gradients(natoms)    # Conservative forces, add wall potential, MTD forces
         forces, result = calc_xtb_gradients(coords,calc,result)
-        elapsed_orca = time.perf_counter() - start_orca
+        elapsed_orca += time.perf_counter() - start_orca
         if thermostat == "L":
             accs = get_acceleration(forces,masses) \
                 + calc_langevin_friction(natoms,gamma,vels) \
                 + calc_langevin_random(natoms,gamma,temp,masses,dt) \
                 + calc_confinement(natoms,coords,masses,rsphere,beta,confining_temp) \
-                + calc_metadynamics_rmsd(natoms,numbers,masses,coords,refcoords,refcount,kpush,alpha)
+                + calc_metadynamics_rmsd(natoms,numbers,masses,coords,refcoords,refcount,kpush,alpha,exclude_atom)
             vels = update_velocities(vels,accs,dt)
         else:
             accs = get_acceleration(forces,masses) \
                 + calc_confinement(natoms,coords,masses,rsphere,beta,confining_temp) \
-                + calc_metadynamics_rmsd(natoms,numbers,masses,coords,refcoords,refcount,kpush,alpha)
+                + calc_metadynamics_rmsd(natoms,numbers,masses,coords,refcoords,refcount,kpush,alpha,exclude_atom)
             vels = update_velocities(vels,accs,dt)
             vels = berendsen_rescale(vels, masses, temp, dt, tau_T=100.0)
 
         # 4. Update half-step velocities
         #vels = update_velocities(vels,accs,dt)
         # Print stuff
-        append_xyz("trajectory",atoms,coords)
-        elapsed = time.perf_counter() - start
-        # print('t = ',t*dt,' fs,   T = ',calc_temperature(natoms,masses,vels),'time: ',elapsed,'seconds')
-        print(
-            f"t = {t * dt:10.2f} fs | "
-            f"T = {calc_temperature(natoms, masses, vels):8.2f} K | "
-            f"Total timings  = {elapsed:10.3f} s | "
-            f"Module timings  = {elapsed_orca:10.3f} s | "
-            )
+        if t % dump == 0:
+            append_xyz("trajectory",atoms,coords)
+            elapsed = time.perf_counter() - start
+            # print('t = ',t*dt,' fs,   T = ',calc_temperature(natoms,masses,vels),'time: ',elapsed,'seconds')
+
+            print(
+                f"t = {t * dt:10.2f} fs | "
+                f"T = {calc_temperature(natoms, masses, vels):8.2f} K | "
+                f"Total timings  = {elapsed:10.3f} s | "
+                f"Module timings  = {elapsed_orca:10.3f} s | "
+                )
+            start = time.perf_counter()
+            elapsed_orca = 0
         refcount += np.ones(len(refcount),dtype=np.int32)
+    end_program = time.perf_counter()-start_program
+    print(
+        f"Overall timing = {end_program:10.3f} s "
+    )
         
         
 
