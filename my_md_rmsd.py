@@ -424,8 +424,8 @@ if __name__ == "__main__":
     
     charge = 0                  # Charge
     multi = 2                   # Multiplicity
-    ntime = 20000               # Number of time steps
-    dump = 100
+    ntime = 10000               # Number of time steps
+    dump = 10
     dt = 0.5                    # Time step in fs
 
     temp = 300.0                # Temperature in K
@@ -438,24 +438,25 @@ if __name__ == "__main__":
 
     tau = 2000                  # Add Metadynamics reference structure each n-th step
     save = 20                   # Maximum images for Metadynamics
-    kpush = 0.3                 # Height of Gaussian in Hartree, this is not converted to SI units for reasons of convenience
-    alpha = 0.7                 # Width of Gaussian in Bohr^{-2}, this is not converted to A for reasons of convenience
+    kpush = 0.1                 # Height of Gaussian in Hartree, this is not converted to SI units for reasons of convenience
+    alpha = 0.6                 # Width of Gaussian in Bohr^{-2}, this is not converted to A for reasons of convenience
     exclude_atom = [10]         # list of atom numbers excluded in RMSD potential (0 for the first atom)
-    refcoords_xyz = ["fb_0.xyz"]
+    refcoords_xyz = []# ["ec_li.xyz"]
     kpush_perm = 0.5
-    alpha_perm = 0.7
+    alpha_perm = 0.4
 
     grad_calc = "XTB"              # gradient calculator ("ORCA" or "XTB")
-    functional = "XTB"
-    pals = "4"
+    functional = "r2SCAN-3c"
+    pals = "16"
     orca_path = "/usr/qc/ORCA6/orca_6_1_1_linux_x86-64_shared_openmpi418/"
     #orca_path = "/Applic.HPC/Easybuild/zen4/2023b/software/ORCA/6.0.1-gompi-2023b-avx2/bin/"
     
     start_program = time.perf_counter()
-    atoms,numbers,masses,coords = read_xyz("ec_li.xyz")
+    atoms,numbers,masses,coords = read_xyz("fb_0.xyz")
     natoms = len(atoms)
     refcoords_perm = np.empty((0,natoms,3),dtype=np.float32)
     for xyz in refcoords_xyz:
+        print("test")
         _, _, _, coord = read_xyz(xyz)
         refcoords_perm = np.append(refcoords_perm, np.array([coord]),axis=0)
 
