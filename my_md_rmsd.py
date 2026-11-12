@@ -6,6 +6,8 @@ os.environ["OMP_MAX_ACTIVE_LEVELS"] = "1"
 os.environ["MKL_NUM_THREADS"] = "1"
 os.environ["OPENBLAS_NUM_THREADS"] = "1"
 
+import argparse
+from pathlib import Path
 import subprocess
 import numpy as np
 import time
@@ -27,7 +29,7 @@ kB = 1.380649e-23          # J/K
 u = 1.66053906892e-27   # kg per atomic mass unit
 BOHR_TO_ANGSTROM = 0.529177210903
 hartree_J = 4.359744722206e-18
-
+working_dir = Path.cwd()
 
 atomic_number = {'H': 1, 'Li': 3, 'B': 5, 'C': 6, 'N': 7, 'O': 8, 'F': 9, 'Si': 14, 'P': 15, 'S': 16, 'Cl': 17, 'Br': 35, 'I': 53}
 #atomic_weight = {'H': 1.008, 'Li': 6.941, 'B': 10.811, 'C': 12.011,
@@ -350,7 +352,7 @@ def calc_metadynamics_rmsd(natoms,numbers,masses,coords,refcoords,refcount,kpush
 
         gaussian = np.exp(-alpha * rmsd2_bohr)
         fbym += fac * gaussian * delta / masses[:, None]
-    acc = (0.496147525704 * 2.0 * alpha * kpush / (natoms * BOHR_TO_ANGSTROM)) * fbym
+    acc = (0.496147525704 * 2.0 * alpha * kpush / (natoms * BOHR_TO_ANGSTROM)) * fbym   #   0.496147525704 = Conversion from Eh/(bohr * amu) to A/fs**2
     fbym = np.zeros((natoms,3),dtype=np.float32)
     for i in range(len(refcoords_perm)):
         # No Scaling factor for permanent refcoords
@@ -418,7 +420,55 @@ def calc_metadynamics_rmsd(natoms,numbers,masses,coords,refcoords,refcount,kpush
     return acc
 
 
+def read_input_file(input_file):
+    coord_file = ""
+    ref_coord_files = []
+    kpush = 0.0
+    alpha = 0.0
+    kpush_perm = 0.0
+    alpha_perm = 0.0
+    with open(input_file) as f:
+        for line in f:
+            line = line.split("#", 1)[0].strip()
+            if not line:
+                continue
+
+            key, value = line.split("=", 1)
+            key = key.strip()
+
+            match key:
+                case "coord":
+                    coord_file = value.strip()
+                case "ref_coord":
+                    ref_coord_files = value.split()
+                case "kpush":
+                    kpush = float(value.strip())
+                case "alpha":
+                    alpha = float(value.strip())
+                case "kpush_perm":
+                    kpush_perm = float(value.strip())
+                case "alpha_perm":
+                    alpha_perm = float(value.strip())
+                case _:
+                    raise ValueError(f"Unknown input keyword: {key}")
+
+
+    return (coord_file, ref_coord_files, kpush, alpha, kpush_perm, alpha_perm)
+            
+
 if __name__ == "__main__":
+
+    ### Parser to read input file    
+    parser = argparse.ArgumentParser(description="Run an MD simulation.")
+    parser.add_argument(
+        "-i", "--input",
+        required=True,
+        help="Path to the input file.",
+    )
+    args = parser.parse_args()
+    coord_file, ref_coord_files, kpush, alpha, kpush_perm, alpha_perm=read_input_file(args.input)
+    print(coord_file, ref_coord_files, kpush, alpha, kpush_perm, alpha_perm)
+
 
     thermostat = "B"        # B for Berendsen and L for Langevin
     
@@ -438,12 +488,12 @@ if __name__ == "__main__":
 
     tau = 2000                  # Add Metadynamics reference structure each n-th step
     save = 20                   # Maximum images for Metadynamics
-    kpush = 0.1                 # Height of Gaussian in Hartree, this is not converted to SI units for reasons of convenience
-    alpha = 0.6                 # Width of Gaussian in Bohr^{-2}, this is not converted to A for reasons of convenience
+    #kpush = 0.1                 # Height of Gaussian in Hartree, this is not converted to SI units for reasons of convenience
+    #alpha = 0.6                 # Width of Gaussian in Bohr^{-2}, this is not converted to A for reasons of convenience
     exclude_atom = [10]         # list of atom numbers excluded in RMSD potential (0 for the first atom)
-    refcoords_xyz = []# ["ec_li.xyz"]
-    kpush_perm = 0.5
-    alpha_perm = 0.4
+    #refcoords_xyz = ["fb_0.xyz"]
+    #kpush_perm = 0.5
+    #alpha_perm = 0.4
 
     grad_calc = "XTB"              # gradient calculator ("ORCA" or "XTB")
     functional = "r2SCAN-3c"
@@ -452,10 +502,10 @@ if __name__ == "__main__":
     #orca_path = "/Applic.HPC/Easybuild/zen4/2023b/software/ORCA/6.0.1-gompi-2023b-avx2/bin/"
     
     start_program = time.perf_counter()
-    atoms,numbers,masses,coords = read_xyz("fb_0.xyz")
+    atoms,numbers,masses,coords = read_xyz(coord_file)
     natoms = len(atoms)
     refcoords_perm = np.empty((0,natoms,3),dtype=np.float32)
-    for xyz in refcoords_xyz:
+    for xyz in ref_coord_files:
         print("test")
         _, _, _, coord = read_xyz(xyz)
         refcoords_perm = np.append(refcoords_perm, np.array([coord]),axis=0)

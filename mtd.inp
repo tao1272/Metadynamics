@@ -1,0 +1,6 @@
+coord = ec_li.xyz
+ref_coord = fb_0.xyz 
+kpush = 0.1
+alpha = 0.6
+kpush_perm = 0.3
+alpha_perm = 0.6
