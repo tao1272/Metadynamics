@@ -1,3 +1,4 @@
+#!/usr/bin/env python
 import os
 
 # Default: one thread outside xTB calculations.
@@ -474,8 +475,8 @@ if __name__ == "__main__":
     
     charge = 0                  # Charge
     multi = 2                   # Multiplicity
-    ntime = 10000               # Number of time steps
-    dump = 10
+    ntime = 4000               # Number of time steps
+    dump = 20                   # Print trajectory xyz after nth step
     dt = 0.5                    # Time step in fs
 
     temp = 300.0                # Temperature in K
@@ -491,12 +492,14 @@ if __name__ == "__main__":
     #kpush = 0.1                 # Height of Gaussian in Hartree, this is not converted to SI units for reasons of convenience
     #alpha = 0.6                 # Width of Gaussian in Bohr^{-2}, this is not converted to A for reasons of convenience
     exclude_atom = [10]         # list of atom numbers excluded in RMSD potential (0 for the first atom)
+    run_equi = True
+    ntime_equi = 500
     #refcoords_xyz = ["fb_0.xyz"]
     #kpush_perm = 0.5
     #alpha_perm = 0.4
 
-    grad_calc = "XTB"              # gradient calculator ("ORCA" or "XTB")
-    functional = "r2SCAN-3c"
+    grad_calc = "XTB"               # gradient calculator ("ORCA" or "XTB")
+    functional = "r2SCAN-3c"        # functional if ORCA is used
     pals = "16"
     orca_path = "/usr/qc/ORCA6/orca_6_1_1_linux_x86-64_shared_openmpi418/"
     #orca_path = "/Applic.HPC/Easybuild/zen4/2023b/software/ORCA/6.0.1-gompi-2023b-avx2/bin/"
@@ -506,7 +509,6 @@ if __name__ == "__main__":
     natoms = len(atoms)
     refcoords_perm = np.empty((0,natoms,3),dtype=np.float32)
     for xyz in ref_coord_files:
-        print("test")
         _, _, _, coord = read_xyz(xyz)
         refcoords_perm = np.append(refcoords_perm, np.array([coord]),axis=0)
 
@@ -515,7 +517,7 @@ if __name__ == "__main__":
     refcoords = np.empty((0,natoms,3),dtype=np.float32)
     refcount = np.empty(0,dtype=np.int32)
     vels = get_initial_velocities(natoms,masses,temp)
-    elapsed_orca = 0
+    elapsed_module = 0
 
     # Gradient Calculation
     if grad_calc == "XTB":
@@ -541,7 +543,58 @@ if __name__ == "__main__":
     print('T_init = ',calc_temperature(natoms,masses,vels))
     start = time.perf_counter()
 
-    # MD loop
+    # Equi Loop
+    if run_equi == True:
+        start_equi = time.perf_counter()
+        for t in range(ntime_equi):
+            # 1. Update half-step velocities
+            vels = update_velocities(vels,accs,dt)
+            # 2. Update positions
+            coords = update_positions(coords,vels,dt)
+            # 3. Calculate new forces & accelerations
+            start_module = time.perf_counter()
+            if grad_calc == "XTB":
+                forces, result = calc_xtb_gradients(coords,calc,t,result)
+            if grad_calc == "ORCA":
+                write_orca_input(charge,multi,pals,functional,atoms,coords)
+                subprocess.call(orca_path+"orca orca.inp > orca.out",shell=True)     
+                subprocess.call("cp -a orca.gbw orca_pre.gbw",shell=True)
+                forces = read_orca_gradients(natoms)  
+            elapsed_module = time.perf_counter() - start_module
+            # 4. Update half-step velocities
+            if thermostat == "L":
+                accs = get_acceleration(forces,masses) \
+                    + calc_langevin_friction(natoms,gamma,vels) \
+                    + calc_langevin_random(natoms,gamma,temp,masses,dt) \
+                    + calc_confinement(natoms,coords,masses,rsphere,beta,confining_temp)
+                vels = update_velocities(vels,accs,dt)
+            else:
+                accs = get_acceleration(forces,masses) \
+                    + calc_confinement(natoms,coords,masses,rsphere,beta,confining_temp) 
+                vels = update_velocities(vels,accs,dt)
+                vels = berendsen_rescale(vels, masses, temp, dt, tau_T=100.0)      
+            if t % dump == 0:
+                append_xyz("trajectory",atoms,coords)
+                elapsed = time.perf_counter() - start
+                print(
+                    f"t = {t * dt:10.2f} fs | "
+                    f"T = {calc_temperature(natoms, masses, vels):8.2f} K | "
+                    f"Total timings  = {elapsed:10.3f} s | "
+                    f"Module timings  = {elapsed_module:10.3f} s | "
+                    )  
+                start = time.perf_counter()
+                elapsed_module = 0
+        append_xyz("trajectory",atoms,coords)
+        write_xyz("equi",atoms,coords)
+        elapsed_equi = time.perf_counter() - start_equi
+        print(
+            f"Equilibration run finished equilibrated structure stored in equi.xyz |" 
+            f"Equilibration timings = {elapsed_equi:10.3f} s"
+        )
+    
+
+
+    # Metadynamics Loop
     for t in range(ntime):
         if t % tau == 0:
             while len(refcoords) >= save:
@@ -549,12 +602,13 @@ if __name__ == "__main__":
                 refcount = np.delete(refcount,0)
             refcoords = np.append(refcoords,np.array([coords]),axis=0)
             refcount = np.append(refcount,np.array(0))
+            print(refcoords)
         # 1. Update half-step velocities
         vels = update_velocities(vels,accs,dt)
         # 2. Update positions
         coords = update_positions(coords,vels,dt)
         # 3. Calculate new forces & accelerations
-        start_orca = time.perf_counter()
+        start_module = time.perf_counter()
         if grad_calc == "XTB":
             forces, result = calc_xtb_gradients(coords,calc,t,result)
         if grad_calc == "ORCA":
@@ -562,7 +616,7 @@ if __name__ == "__main__":
             subprocess.call(orca_path+"orca orca.inp > orca.out",shell=True)     
             subprocess.call("cp -a orca.gbw orca_pre.gbw",shell=True)
             forces = read_orca_gradients(natoms)
-        elapsed_orca += time.perf_counter() - start_orca
+        elapsed_module += time.perf_counter() - start_module
 
         # 4. Update half-step velocities
         if thermostat == "L":
@@ -587,10 +641,10 @@ if __name__ == "__main__":
                 f"t = {t * dt:10.2f} fs | "
                 f"T = {calc_temperature(natoms, masses, vels):8.2f} K | "
                 f"Total timings  = {elapsed:10.3f} s | "
-                f"Module timings  = {elapsed_orca:10.3f} s | "
+                f"Module timings  = {elapsed_module:10.3f} s | "
                 )
             start = time.perf_counter()
-            elapsed_orca = 0
+            elapsed_module = 0
         refcount += np.ones(len(refcount),dtype=np.int32)
     program_timing = time.perf_counter()-start_program
     hours, remainder = divmod(round(program_timing, 3), 3600)
