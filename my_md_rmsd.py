@@ -229,7 +229,9 @@ def update_velocities(vels,accs,dt):
 def update_positions(coords,vels,dt):
     return coords + vels*dt
 
-
+def calc_distance(atom1, atom2):
+    distance = np.linalg.norm(atom1-atom2)
+    return distance
 
 
 
@@ -282,6 +284,7 @@ def calc_confinement(natoms, coords, masses, rsphere, beta, temp, return_energy=
 
 def calc_metadynamics_rmsd(natoms,numbers,masses,coords,refcoords,refcount,kpush,alpha,exclude_atom,refcoords_perm,kpush_perm,alpha_perm):
     if len(exclude_atom) > 0:
+        exclude_atom.sort(reverse=True)
         natoms -= len(exclude_atom)
         for ex in exclude_atom:
             masses = np.delete(masses,ex)
@@ -416,10 +419,53 @@ def calc_metadynamics_rmsd(natoms,numbers,masses,coords,refcoords,refcount,kpush
     acc += (0.496147525704 * 2.0 * alpha_perm * kpush_perm / (natoms * BOHR_TO_ANGSTROM)) * fbym
   
     if len(exclude_atom) > 0:
-                for ex in exclude_atom:
-                    acc = np.insert(acc, ex,np.array([[float(0),float(0),float(0)]]),axis=0)
+        exclude_atom.sort()
+        for ex in exclude_atom:
+            acc = np.insert(acc, ex,np.array([[float(0),float(0),float(0)]]),axis=0)
     return acc
 
+
+def calc_pairs(natoms, coords):
+    x = coords
+    pairs = []
+    for j in range(natoms):
+        for k in range(j):
+            if j == k: continue
+            distance = calc_distance(x[j],x[k])
+            if distance <= 1.7:     #determine bond neighbours
+                pairs.append((j,k))
+    print(pairs)
+    return pairs
+
+def calc_metadynamics_localRMSD(natoms,numbers,masses,coords,refcoords,refcount,kpush,alpha,pairs_list):
+    x = coords / BOHR_TO_ANGSTROM   #convert to Bohr
+    # print(x)
+    # print(coords)
+
+    acc = np.zeros((natoms, 3),dtype=np.float32)
+    force = np.zeros((natoms, 3),dtype=np.float32)
+    
+    for i in range(len(refcoords)):
+        fac = 2.0 / ( 1.0 + np.exp(-0.03*refcount[i]) ) - 1.0
+        delta = 0.0
+        y = refcoords[i][:] / BOHR_TO_ANGSTROM  #convert to Bohr
+        pairs = pairs_list[i]
+        delta_dev = {}
+        for j,k in pairs:
+            r_pair = x[j]-x[k]
+            r_pair_ref = y[j]-y[k]
+            delta += (np.linalg.norm(r_pair) - np.linalg.norm(r_pair_ref)) #/ natoms
+            delta_dev[(j,k)] = r_pair / np.linalg.norm(r_pair)
+        # print(delta_dev)
+
+        # Force derivation
+        pre_factor = 2*alpha*fac*kpush*delta*np.exp(-alpha * delta * delta)
+        for j,k in pairs:
+            force[j] += pre_factor * delta_dev[(j,k)]
+            force[k] -= pre_factor * delta_dev[(j,k)]
+        # print(force)
+    # print(force/ masses[:,None])
+    return (0.496147525704 * force)/ (masses[:,None])#*natoms)
 
 def read_input_file(input_file):
     coord_file = ""
@@ -475,7 +521,7 @@ if __name__ == "__main__":
     
     charge = 0                  # Charge
     multi = 2                   # Multiplicity
-    ntime = 4000               # Number of time steps
+    ntime = 10000               # Number of time steps
     dump = 20                   # Print trajectory xyz after nth step
     dt = 0.5                    # Time step in fs
 
@@ -488,11 +534,11 @@ if __name__ == "__main__":
     beta = 6.0 / 0.529177       # steepness of confining potential, converted form Bohrs (xtb) to A
 
     tau = 2000                  # Add Metadynamics reference structure each n-th step
-    save = 20                   # Maximum images for Metadynamics
+    save = 5                   # Maximum images for Metadynamics
     #kpush = 0.1                 # Height of Gaussian in Hartree, this is not converted to SI units for reasons of convenience
     #alpha = 0.6                 # Width of Gaussian in Bohr^{-2}, this is not converted to A for reasons of convenience
-    exclude_atom = [10]         # list of atom numbers excluded in RMSD potential (0 for the first atom)
-    run_equi = True
+    exclude_atom = []#[0,2,3,6,7,8,9,10]         # list of atom numbers excluded in RMSD potential (0 for the first atom)
+    run_equi = False
     ntime_equi = 500
     #refcoords_xyz = ["fb_0.xyz"]
     #kpush_perm = 0.5
@@ -511,8 +557,8 @@ if __name__ == "__main__":
     for xyz in ref_coord_files:
         _, _, _, coord = read_xyz(xyz)
         refcoords_perm = np.append(refcoords_perm, np.array([coord]),axis=0)
+    pairs_list=[]
 
-    print(refcoords_perm)
     coords -= calc_center_of_mass(atoms,coords)
     refcoords = np.empty((0,natoms,3),dtype=np.float32)
     refcount = np.empty(0,dtype=np.int32)
@@ -592,7 +638,7 @@ if __name__ == "__main__":
             f"Equilibration timings = {elapsed_equi:10.3f} s"
         )
     
-
+    
 
     # Metadynamics Loop
     for t in range(ntime):
@@ -602,7 +648,8 @@ if __name__ == "__main__":
                 refcount = np.delete(refcount,0)
             refcoords = np.append(refcoords,np.array([coords]),axis=0)
             refcount = np.append(refcount,np.array(0))
-            print(refcoords)
+            pairs_list.append(calc_pairs(natoms, coords))
+            #print(pairs_list)
         # 1. Update half-step velocities
         vels = update_velocities(vels,accs,dt)
         # 2. Update positions
@@ -629,7 +676,8 @@ if __name__ == "__main__":
         else:
             accs = get_acceleration(forces,masses) \
                 + calc_confinement(natoms,coords,masses,rsphere,beta,confining_temp) \
-                + calc_metadynamics_rmsd(natoms,numbers,masses,coords,refcoords,refcount,kpush,alpha,exclude_atom,refcoords_perm,kpush_perm,alpha_perm)
+                + calc_metadynamics_localRMSD(natoms,numbers,masses,coords,refcoords,refcount,kpush,alpha,pairs_list) 
+                #+ calc_metadynamics_rmsd(natoms,numbers,masses,coords,refcoords,refcount,kpush,alpha,exclude_atom,refcoords_perm,kpush_perm,alpha_perm)
             vels = update_velocities(vels,accs,dt)
             vels = berendsen_rescale(vels, masses, temp, dt, tau_T=100.0)
 
