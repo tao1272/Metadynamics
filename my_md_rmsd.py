@@ -425,14 +425,18 @@ def calc_metadynamics_rmsd(natoms,numbers,masses,coords,refcoords,refcount,kpush
     return acc
 
 
-def calc_pairs(natoms, coords):
-    x = coords
+def calc_pairs(natoms, coords, exclude_atom):
+    
     pairs = []
-    for j in range(natoms):
+    if len(exclude_atom) > 0:
+        for ex in exclude_atom:
+            coords = np.delete(coords,ex,axis=0)
+    x = coords
+    for j in range(natoms-len(exclude_atom)):
         for k in range(j):
             if j == k: continue
             distance = calc_distance(x[j],x[k])
-            if distance <= 1.7:     #determine bond neighbours
+            if distance <= 1.65:     #determine bond neighbours
                 pairs.append((j,k))
     print(pairs)
     return pairs
@@ -648,7 +652,7 @@ if __name__ == "__main__":
                 refcount = np.delete(refcount,0)
             refcoords = np.append(refcoords,np.array([coords]),axis=0)
             refcount = np.append(refcount,np.array(0))
-            pairs_list.append(calc_pairs(natoms, coords))
+            pairs_list.append(calc_pairs(natoms, coords, exclude_atom))
             #print(pairs_list)
         # 1. Update half-step velocities
         vels = update_velocities(vels,accs,dt)
