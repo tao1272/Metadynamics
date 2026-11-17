@@ -441,7 +441,7 @@ def calc_pairs(natoms, coords, exclude_atom):
     print(pairs)
     return pairs
 
-def calc_metadynamics_localRMSD(natoms,numbers,masses,coords,refcoords,refcount,kpush,alpha,pairs_list):
+def calc_metadynamics_bonds(natoms,numbers,masses,coords,refcoords,refcount,kpush,alpha,pairs_list):
     x = coords / BOHR_TO_ANGSTROM   #convert to Bohr
     # print(x)
     # print(coords)
@@ -458,8 +458,8 @@ def calc_metadynamics_localRMSD(natoms,numbers,masses,coords,refcoords,refcount,
         for j,k in pairs:
             r_pair = x[j]-x[k]
             r_pair_ref = y[j]-y[k]
-            delta += (np.linalg.norm(r_pair) - np.linalg.norm(r_pair_ref)) #/ natoms
-            delta_dev[(j,k)] = r_pair / np.linalg.norm(r_pair)
+            delta += (np.linalg.norm(r_pair) - np.linalg.norm(r_pair_ref)) / np.sqrt(len(pairs))
+            delta_dev[(j,k)] = r_pair / np.linalg.norm(r_pair) / np.sqrt(len(pairs)) 
         # print(delta_dev)
 
         # Force derivation
@@ -470,6 +470,33 @@ def calc_metadynamics_localRMSD(natoms,numbers,masses,coords,refcoords,refcount,
         # print(force)
     # print(force/ masses[:,None])
     return (0.496147525704 * force)/ (masses[:,None])#*natoms)
+
+def calc_metadynamics_bondsnorm(natoms,numbers,masses,coords,refcoords,refcount,kpush,alpha,pairs_list):
+    x = coords / BOHR_TO_ANGSTROM   #convert to Bohr
+    acc = np.zeros((natoms, 3),dtype=np.float32)
+    force = np.zeros((natoms, 3),dtype=np.float32)
+    
+    for i in range(len(refcoords)):
+        fac = 2.0 / ( 1.0 + np.exp(-0.03*refcount[i]) ) - 1.0
+        delta = 0.0
+        y = refcoords[i][:] / BOHR_TO_ANGSTROM  #convert to Bohr
+        pairs = pairs_list[i]
+        delta_dev = {}
+        for j,k in pairs:
+            r_pair = x[j]-x[k]
+            r_pair_ref = y[j]-y[k]
+            delta += (1/(len(pairs)))*(np.linalg.norm(r_pair) - np.linalg.norm(r_pair_ref))**2 #/ natoms
+            delta_dev[(j,k)] = (2/len(pairs)) * (np.linalg.norm(r_pair) - np.linalg.norm(r_pair_ref)) * (r_pair / np.linalg.norm(r_pair))
+        delta  = np.sqrt(delta)
+        # Force derivation
+        pre_factor = 2*alpha*fac*kpush*np.exp(-alpha * delta * delta)
+        for j,k in pairs:
+            force[j] += pre_factor * delta_dev[(j,k)]
+            force[k] -= pre_factor * delta_dev[(j,k)]
+        # print(force)
+    # print(force/ masses[:,None])
+    return (0.496147525704 * force)/ (masses[:,None])#*natoms)
+
 
 def read_input_file(input_file):
     coord_file = ""
@@ -538,11 +565,11 @@ if __name__ == "__main__":
     beta = 6.0 / 0.529177       # steepness of confining potential, converted form Bohrs (xtb) to A
 
     tau = 2000                  # Add Metadynamics reference structure each n-th step
-    save = 5                   # Maximum images for Metadynamics
+    save = 3                   # Maximum images for Metadynamics
     #kpush = 0.1                 # Height of Gaussian in Hartree, this is not converted to SI units for reasons of convenience
     #alpha = 0.6                 # Width of Gaussian in Bohr^{-2}, this is not converted to A for reasons of convenience
-    exclude_atom = []#[0,2,3,6,7,8,9,10]         # list of atom numbers excluded in RMSD potential (0 for the first atom)
-    run_equi = False
+    exclude_atom = [10]#[0,2,3,6,7,8,9,10]         # list of atom numbers excluded in RMSD potential (0 for the first atom)
+    run_equi = True
     ntime_equi = 500
     #refcoords_xyz = ["fb_0.xyz"]
     #kpush_perm = 0.5
@@ -680,7 +707,7 @@ if __name__ == "__main__":
         else:
             accs = get_acceleration(forces,masses) \
                 + calc_confinement(natoms,coords,masses,rsphere,beta,confining_temp) \
-                + calc_metadynamics_localRMSD(natoms,numbers,masses,coords,refcoords,refcount,kpush,alpha,pairs_list) 
+                + calc_metadynamics_bonds(natoms,numbers,masses,coords,refcoords,refcount,kpush,alpha,pairs_list) 
                 #+ calc_metadynamics_rmsd(natoms,numbers,masses,coords,refcoords,refcount,kpush,alpha,exclude_atom,refcoords_perm,kpush_perm,alpha_perm)
             vels = update_velocities(vels,accs,dt)
             vels = berendsen_rescale(vels, masses, temp, dt, tau_T=100.0)
