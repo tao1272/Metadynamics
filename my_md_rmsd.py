@@ -15,7 +15,7 @@ import time
 from xtb.interface import Calculator, Param
 from xtb.libxtb import VERBOSITY_MUTED
 from threadpoolctl import ThreadpoolController
-
+from gxtb_gradients import calc_gxtb_gradients
 
 # Create after importing NumPy and xTB.
 thread_controller = ThreadpoolController()
@@ -429,6 +429,7 @@ def calc_pairs(natoms, coords, exclude_atom):
     
     pairs = []
     if len(exclude_atom) > 0:
+        exclude_atom.sort(reverse=True)
         for ex in exclude_atom:
             coords = np.delete(coords,ex,axis=0)
     x = coords
@@ -459,7 +460,7 @@ def calc_metadynamics_bonds(natoms,numbers,masses,coords,refcoords,refcount,kpus
             r_pair = x[j]-x[k]
             r_pair_ref = y[j]-y[k]
             delta += (np.linalg.norm(r_pair) - np.linalg.norm(r_pair_ref)) / np.sqrt(len(pairs))
-            delta_dev[(j,k)] = r_pair / np.linalg.norm(r_pair) / np.sqrt(len(pairs)) 
+            delta_dev[(j,k)] = (r_pair / np.linalg.norm(r_pair)) / np.sqrt(len(pairs)) 
         # print(delta_dev)
 
         # Force derivation
@@ -575,7 +576,7 @@ if __name__ == "__main__":
     #kpush_perm = 0.5
     #alpha_perm = 0.4
 
-    grad_calc = "XTB"               # gradient calculator ("ORCA" or "XTB")
+    grad_calc = "GXTB"               # gradient calculator ("ORCA" or "XTB")
     functional = "r2SCAN-3c"        # functional if ORCA is used
     pals = "16"
     orca_path = "/usr/qc/ORCA6/orca_6_1_1_linux_x86-64_shared_openmpi418/"
@@ -609,6 +610,17 @@ if __name__ == "__main__":
         calc.set_accuracy(1.0)
         calc.set_electronic_temperature(6000.0)
         forces, result = calc_xtb_gradients(coords,calc,0)
+    if grad_calc == "GXTB":
+        forces, energy = calc_gxtb_gradients(
+            coords,
+            atoms,
+            charge=charge,
+            multi=multi,
+            executable="/usr/qc/xtb-6.7.1_gxtb/bin/xtb",
+            ncores=XTB_CORES,
+            electronic_temperature=6000.0,
+            workdir="gxtb_run",
+        )
     if grad_calc == "ORCA":
         write_initial_orca_input(charge,multi,pals,functional,atoms,coords)
         subprocess.call(orca_path+"orca orca.inp > orca.out",shell=True)
@@ -632,6 +644,17 @@ if __name__ == "__main__":
             start_module = time.perf_counter()
             if grad_calc == "XTB":
                 forces, result = calc_xtb_gradients(coords,calc,t,result)
+            if grad_calc == "GXTB":
+                forces, energy = calc_gxtb_gradients(
+                    coords,
+                    atoms,
+                    charge=charge,
+                    multi=multi,
+                    executable="/usr/qc/xtb-6.7.1_gxtb/bin/xtb",
+                    ncores=XTB_CORES,
+                    electronic_temperature=6000.0,
+                    workdir="gxtb_run",
+                )
             if grad_calc == "ORCA":
                 write_orca_input(charge,multi,pals,functional,atoms,coords)
                 subprocess.call(orca_path+"orca orca.inp > orca.out",shell=True)     
@@ -689,6 +712,17 @@ if __name__ == "__main__":
         start_module = time.perf_counter()
         if grad_calc == "XTB":
             forces, result = calc_xtb_gradients(coords,calc,t,result)
+        if grad_calc == "GXTB":
+            forces, energy = calc_gxtb_gradients(
+                coords,
+                atoms,
+                charge=charge,
+                multi=multi,
+                executable="/usr/qc/xtb-6.7.1_gxtb/bin/xtb",
+                ncores=XTB_CORES,
+                electronic_temperature=6000.0,
+                workdir="gxtb_run",
+            )
         if grad_calc == "ORCA":
             write_orca_input(charge,multi,pals,functional,atoms,coords)
             subprocess.call(orca_path+"orca orca.inp > orca.out",shell=True)     
