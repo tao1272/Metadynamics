@@ -553,7 +553,7 @@ if __name__ == "__main__":
     
     charge = 0                  # Charge
     multi = 2                   # Multiplicity
-    ntime = 10000               # Number of time steps
+    ntime = 60000               # Number of time steps
     dump = 20                   # Print trajectory xyz after nth step
     dt = 0.5                    # Time step in fs
 
