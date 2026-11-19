@@ -442,7 +442,7 @@ def calc_pairs(natoms, coords, exclude_atom):
     print(pairs)
     return pairs
 
-def calc_metadynamics_bonds(natoms,numbers,masses,coords,refcoords,refcount,kpush,alpha,pairs_list):
+def calc_metadynamics_bonds(natoms,numbers,masses,coords,refcoords,refcount,kpush,alpha,pairs_list,refcoords_perm,kpush_perm,alpha_perm,pairs_list_perm):
     x = coords / BOHR_TO_ANGSTROM   #convert to Bohr
     # print(x)
     # print(coords)
@@ -468,8 +468,25 @@ def calc_metadynamics_bonds(natoms,numbers,masses,coords,refcoords,refcount,kpus
         for j,k in pairs:
             force[j] += pre_factor * delta_dev[(j,k)]
             force[k] -= pre_factor * delta_dev[(j,k)]
-        # print(force)
-    # print(force/ masses[:,None])
+
+    for i in range(len(refcoords_perm)):
+        delta = 0.0
+        y = refcoords_perm[i][:] / BOHR_TO_ANGSTROM  #convert to Bohr
+        pairs = pairs_list_perm[i]
+        delta_dev = {}
+        for j,k in pairs:
+            r_pair = x[j]-x[k]
+            r_pair_ref = y[j]-y[k]
+            delta += (np.linalg.norm(r_pair) - np.linalg.norm(r_pair_ref)) / np.sqrt(len(pairs))
+            delta_dev[(j,k)] = (r_pair / np.linalg.norm(r_pair)) / np.sqrt(len(pairs)) 
+        # print(delta_dev)
+
+        # Force derivation
+        pre_factor = 2*alpha_perm*kpush_perm*delta*np.exp(-alpha_perm * delta * delta)
+        for j,k in pairs:
+            force[j] += pre_factor * delta_dev[(j,k)]
+            force[k] -= pre_factor * delta_dev[(j,k)]
+
     return (0.496147525704 * force)/ (masses[:,None])#*natoms)
 
 def calc_metadynamics_bondsnorm(natoms,numbers,masses,coords,refcoords,refcount,kpush,alpha,pairs_list):
@@ -518,6 +535,8 @@ def read_input_file(input_file):
             match key:
                 case "coord":
                     coord_file = value.strip()
+                case "grad_calc":
+                    grad_calc = value.strip()
                 case "ref_coord":
                     ref_coord_files = value.split()
                 case "kpush":
@@ -532,7 +551,7 @@ def read_input_file(input_file):
                     raise ValueError(f"Unknown input keyword: {key}")
 
 
-    return (coord_file, ref_coord_files, kpush, alpha, kpush_perm, alpha_perm)
+    return (coord_file, grad_calc, ref_coord_files, kpush, alpha, kpush_perm, alpha_perm)
             
 
 if __name__ == "__main__":
@@ -545,7 +564,7 @@ if __name__ == "__main__":
         help="Path to the input file.",
     )
     args = parser.parse_args()
-    coord_file, ref_coord_files, kpush, alpha, kpush_perm, alpha_perm=read_input_file(args.input)
+    coord_file, grad_calc, ref_coord_files, kpush, alpha, kpush_perm, alpha_perm=read_input_file(args.input)
     print(coord_file, ref_coord_files, kpush, alpha, kpush_perm, alpha_perm)
 
 
@@ -553,7 +572,7 @@ if __name__ == "__main__":
     
     charge = 0                  # Charge
     multi = 2                   # Multiplicity
-    ntime = 60000               # Number of time steps
+    ntime = 10000               # Number of time steps
     dump = 20                   # Print trajectory xyz after nth step
     dt = 0.5                    # Time step in fs
 
@@ -570,17 +589,19 @@ if __name__ == "__main__":
     #kpush = 0.1                 # Height of Gaussian in Hartree, this is not converted to SI units for reasons of convenience
     #alpha = 0.6                 # Width of Gaussian in Bohr^{-2}, this is not converted to A for reasons of convenience
     exclude_atom = [10]#[0,2,3,6,7,8,9,10]         # list of atom numbers excluded in RMSD potential (0 for the first atom)
-    run_equi = True
-    ntime_equi = 500
+    run_equi = False
+    ntime_equi = 1000
     #refcoords_xyz = ["fb_0.xyz"]
     #kpush_perm = 0.5
     #alpha_perm = 0.4
 
-    grad_calc = "GXTB"               # gradient calculator ("ORCA" or "XTB")
+    #grad_calc = "GXTB"               # gradient calculator ("ORCA" or "XTB")
     functional = "r2SCAN-3c"        # functional if ORCA is used
-    pals = "16"
+    pals = "8"
     orca_path = "/usr/qc/ORCA6/orca_6_1_1_linux_x86-64_shared_openmpi418/"
     #orca_path = "/Applic.HPC/Easybuild/zen4/2023b/software/ORCA/6.0.1-gompi-2023b-avx2/bin/"
+    
+    gxtb_path = "/usr/qc/xtb-6.7.1_gxtb/bin/xtb"
     
     start_program = time.perf_counter()
     atoms,numbers,masses,coords = read_xyz(coord_file)
@@ -590,7 +611,10 @@ if __name__ == "__main__":
         _, _, _, coord = read_xyz(xyz)
         refcoords_perm = np.append(refcoords_perm, np.array([coord]),axis=0)
     pairs_list=[]
+    pairs_list_perm=[]
 
+    for coords_perm in refcoords_perm:
+        pairs_list_perm.append(calc_pairs(natoms, coords_perm, exclude_atom))
     coords -= calc_center_of_mass(atoms,coords)
     refcoords = np.empty((0,natoms,3),dtype=np.float32)
     refcount = np.empty(0,dtype=np.int32)
@@ -616,7 +640,7 @@ if __name__ == "__main__":
             atoms,
             charge=charge,
             multi=multi,
-            executable="/usr/qc/xtb-6.7.1_gxtb/bin/xtb",
+            executable=gxtb_path,
             ncores=XTB_CORES,
             electronic_temperature=6000.0,
             workdir="gxtb_run",
@@ -650,7 +674,7 @@ if __name__ == "__main__":
                     atoms,
                     charge=charge,
                     multi=multi,
-                    executable="/usr/qc/xtb-6.7.1_gxtb/bin/xtb",
+                    executable=gxtb_path,
                     ncores=XTB_CORES,
                     electronic_temperature=6000.0,
                     workdir="gxtb_run",
@@ -718,7 +742,7 @@ if __name__ == "__main__":
                 atoms,
                 charge=charge,
                 multi=multi,
-                executable="/usr/qc/xtb-6.7.1_gxtb/bin/xtb",
+                executable=gxtb_path,
                 ncores=XTB_CORES,
                 electronic_temperature=6000.0,
                 workdir="gxtb_run",
@@ -741,7 +765,7 @@ if __name__ == "__main__":
         else:
             accs = get_acceleration(forces,masses) \
                 + calc_confinement(natoms,coords,masses,rsphere,beta,confining_temp) \
-                + calc_metadynamics_bonds(natoms,numbers,masses,coords,refcoords,refcount,kpush,alpha,pairs_list) 
+                + calc_metadynamics_bonds(natoms,numbers,masses,coords,refcoords,refcount,kpush,alpha,pairs_list,refcoords_perm,kpush_perm,alpha_perm,pairs_list_perm) 
                 #+ calc_metadynamics_rmsd(natoms,numbers,masses,coords,refcoords,refcount,kpush,alpha,exclude_atom,refcoords_perm,kpush_perm,alpha_perm)
             vels = update_velocities(vels,accs,dt)
             vels = berendsen_rescale(vels, masses, temp, dt, tau_T=100.0)
