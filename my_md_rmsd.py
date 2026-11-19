@@ -449,7 +449,8 @@ def calc_metadynamics_bonds(natoms,numbers,masses,coords,refcoords,refcount,kpus
 
     acc = np.zeros((natoms, 3),dtype=np.float32)
     force = np.zeros((natoms, 3),dtype=np.float32)
-    
+    delta = 0.0
+    delta_perm = 0.0
     for i in range(len(refcoords)):
         fac = 2.0 / ( 1.0 + np.exp(-0.03*refcount[i]) ) - 1.0
         delta = 0.0
@@ -461,7 +462,6 @@ def calc_metadynamics_bonds(natoms,numbers,masses,coords,refcoords,refcount,kpus
             r_pair_ref = y[j]-y[k]
             delta += (np.linalg.norm(r_pair) - np.linalg.norm(r_pair_ref)) / np.sqrt(len(pairs))
             delta_dev[(j,k)] = (r_pair / np.linalg.norm(r_pair)) / np.sqrt(len(pairs)) 
-        # print(delta_dev)
 
         # Force derivation
         pre_factor = 2*alpha*fac*kpush*delta*np.exp(-alpha * delta * delta)
@@ -470,24 +470,24 @@ def calc_metadynamics_bonds(natoms,numbers,masses,coords,refcoords,refcount,kpus
             force[k] -= pre_factor * delta_dev[(j,k)]
 
     for i in range(len(refcoords_perm)):
-        delta = 0.0
+        delta_perm = 0.0
         y = refcoords_perm[i][:] / BOHR_TO_ANGSTROM  #convert to Bohr
         pairs = pairs_list_perm[i]
         delta_dev = {}
         for j,k in pairs:
             r_pair = x[j]-x[k]
             r_pair_ref = y[j]-y[k]
-            delta += (np.linalg.norm(r_pair) - np.linalg.norm(r_pair_ref)) / np.sqrt(len(pairs))
+            delta_perm += (np.linalg.norm(r_pair) - np.linalg.norm(r_pair_ref)) / np.sqrt(len(pairs))
             delta_dev[(j,k)] = (r_pair / np.linalg.norm(r_pair)) / np.sqrt(len(pairs)) 
         # print(delta_dev)
 
         # Force derivation
-        pre_factor = 2*alpha_perm*kpush_perm*delta*np.exp(-alpha_perm * delta * delta)
+        pre_factor = 2*alpha_perm*kpush_perm*delta_perm*np.exp(-alpha_perm * delta_perm * delta_perm)
         for j,k in pairs:
             force[j] += pre_factor * delta_dev[(j,k)]
             force[k] -= pre_factor * delta_dev[(j,k)]
 
-    return (0.496147525704 * force)/ (masses[:,None])#*natoms)
+    return (0.496147525704 * force)/ (masses[:,None]), delta, delta_perm
 
 def calc_metadynamics_bondsnorm(natoms,numbers,masses,coords,refcoords,refcount,kpush,alpha,pairs_list):
     x = coords / BOHR_TO_ANGSTROM   #convert to Bohr
@@ -572,7 +572,7 @@ if __name__ == "__main__":
     
     charge = 0                  # Charge
     multi = 2                   # Multiplicity
-    ntime = 10000               # Number of time steps
+    ntime = 60000               # Number of time steps
     dump = 20                   # Print trajectory xyz after nth step
     dt = 0.5                    # Time step in fs
 
@@ -585,12 +585,12 @@ if __name__ == "__main__":
     beta = 6.0 / 0.529177       # steepness of confining potential, converted form Bohrs (xtb) to A
 
     tau = 2000                  # Add Metadynamics reference structure each n-th step
-    save = 3                   # Maximum images for Metadynamics
+    save = 5                   # Maximum images for Metadynamics
     #kpush = 0.1                 # Height of Gaussian in Hartree, this is not converted to SI units for reasons of convenience
     #alpha = 0.6                 # Width of Gaussian in Bohr^{-2}, this is not converted to A for reasons of convenience
     exclude_atom = [10]#[0,2,3,6,7,8,9,10]         # list of atom numbers excluded in RMSD potential (0 for the first atom)
-    run_equi = False
-    ntime_equi = 1000
+    run_equi = True
+    ntime_equi = 500
     #refcoords_xyz = ["fb_0.xyz"]
     #kpush_perm = 0.5
     #alpha_perm = 0.4
@@ -763,9 +763,9 @@ if __name__ == "__main__":
                 + calc_metadynamics_rmsd(natoms,numbers,masses,coords,refcoords,refcount,kpush,alpha,exclude_atom,refcoords_perm,kpush_perm,alpha_perm)
             vels = update_velocities(vels,accs,dt)
         else:
-            accs = get_acceleration(forces,masses) \
-                + calc_confinement(natoms,coords,masses,rsphere,beta,confining_temp) \
-                + calc_metadynamics_bonds(natoms,numbers,masses,coords,refcoords,refcount,kpush,alpha,pairs_list,refcoords_perm,kpush_perm,alpha_perm,pairs_list_perm) 
+            accs, delta, delta_perm = calc_metadynamics_bonds(natoms,numbers,masses,coords,refcoords,refcount,kpush,alpha,pairs_list,refcoords_perm,kpush_perm,alpha_perm,pairs_list_perm) 
+            accs += get_acceleration(forces,masses) \
+                 + calc_confinement(natoms,coords,masses,rsphere,beta,confining_temp) 
                 #+ calc_metadynamics_rmsd(natoms,numbers,masses,coords,refcoords,refcount,kpush,alpha,exclude_atom,refcoords_perm,kpush_perm,alpha_perm)
             vels = update_velocities(vels,accs,dt)
             vels = berendsen_rescale(vels, masses, temp, dt, tau_T=100.0)
@@ -779,6 +779,8 @@ if __name__ == "__main__":
                 f"T = {calc_temperature(natoms, masses, vels):8.2f} K | "
                 f"Total timings  = {elapsed:10.3f} s | "
                 f"Module timings  = {elapsed_module:10.3f} s | "
+                f"delta = {delta:10.3f}  | "
+                f"delta_perm = {delta_perm:10.3f}  | "
                 )
             start = time.perf_counter()
             elapsed_module = 0
