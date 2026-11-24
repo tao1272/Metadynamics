@@ -544,32 +544,20 @@ def calc_sprint(natoms,numbers,masses,coords,exclude_atom=[]):
     acc = np.zeros((natoms, 3),dtype=np.float32)
     force = np.zeros((natoms, 3),dtype=np.float32)
     a = np.zeros((natoms, natoms),dtype=np.float32)     # adjacency matrix a_ij
-    # print(r0[tuple(sorted((numbers[0],numbers[1])))])
-    # print(np.linalg.norm(x[0]-x[1]))
-    # print( 1 / (1-(np.linalg.norm(x[0]-x[1])/r0[tuple(sorted((numbers[0],numbers[1])))])**n)    )
+
     for i in range(natoms):
         for j in range(natoms):
             if i == j: continue
-            # print(numbers[i])
-            # print(numbers[j])
-            # # print(sorted(2,1))
             a[i][j] = (
                         (1-(np.linalg.norm(x[i]-x[j])/r0[tuple(sorted((numbers[i],numbers[j])))])**n) 
                          /
                         (1-(np.linalg.norm(x[i]-x[j])/r0[tuple(sorted((numbers[i],numbers[j])))])**m)
                       )
-            #a[i][j] = 1 / (1-(np.linalg.norm(x[i]-x[j])/r0[tuple(sorted((numbers[i],numbers[j])))])**m)
-    # with np.printoptions(precision=4, suppress=True, linewidth=200):
-    #     print(a)
+
     eigenvalue, eigenvector = np.linalg.eigh(a)
     lambda_max = eigenvalue[-1]
-   
     v_max = np.abs(eigenvector[:,-1])
-    # with np.printoptions(precision=4, suppress=True, linewidth=200):
-    #     print(v_max)
-    #     print(lambda_max)
     sprint = np.sqrt(natoms) * lambda_max * v_max
-
     return sprint, eigenvalue, eigenvector
 
 
@@ -637,21 +625,20 @@ def calc_metadynamics_sprint(natoms,numbers,masses,coords,refcoords,refcount,kpu
         delta = sprint_sorted - sprint_ref_sorted
         delta_sqrt = np.dot(delta,delta)
     
-        dgauß_dsprint_sorted =  -kpush * alpha * delta * np.exp(-alpha * delta_sqrt)    ## dG/dS_i  sorted declining
+        dgauß_dsprint_sorted =  -2.0 * kpush * alpha * delta * np.exp(-alpha * delta_sqrt)    ## dG/dS_i  sorted declining
         dgauß_dsprint = np.empty_like(dgauß_dsprint_sorted) 
-        dgauß_dsprint[order] = dgauß_dsprint                                            ## dG/dS_I original order
+        dgauß_dsprint[order] = dgauß_dsprint_sorted                                            ## dG/dS_I original order
         for j in range(natoms):
             for k in range(j):
-                for l in range(natoms):
-                    force[j] += -dgauß_dsprint[l] * a_dev[j,k]
-                    force[k] -= -dgauß_dsprint[l] * a_dev[j,k]
+                pair_force = -(dgauß_dsprint @ sprint_dev[:, j, k]) * a_dev[j, k]
+                force[j] += pair_force
+                force[k] -= pair_force
 
-        with np.printoptions(precision=4, suppress=True, linewidth=200):
-            print(force[:])
+        # with np.printoptions(precision=4, suppress=True, linewidth=200):
+            # print(force[:])
             # print(a_dev[:,:,0])
             # print(sprint_dev[:,1,0])
-        # print(v_max)
-        # print(lambda_max)
+
     acc = 0.496147525704 * force / masses[:,None]
     if len(exclude_atom) > 0:
             exclude_atom.sort()
@@ -720,7 +707,7 @@ if __name__ == "__main__":
     
     charge = 0                  # Charge
     multi = 2                   # Multiplicity
-    ntime = 2000               # Number of time steps
+    ntime = 10000               # Number of time steps
     dump = 20                   # Print trajectory xyz after nth step
     dt = 0.5                    # Time step in fs
 
