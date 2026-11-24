@@ -43,7 +43,19 @@ atomic_weight = {'H': 4.000, 'Li': 6.941, 'B': 10.811, 'C': 12.011,
                  'Mo': 95.96, 'Ru': 101.07, 'Sn': 118.710, 'Te': 127.60,
                  'I': 126.904, 'Xe': 131.293}
 
-
+#r_0 = {(1,1): 0.9, (1,6): 1.3, (1,8): 1.2, (1,3): 1.9, (3,6): 2.5, (3,8): 2.4, (3,3): 3.2, (6,7): 1.7, (6,6) : 1.8, (7,7): 1.6}
+r0 = {
+    (1, 1): 0.74,  # H–H
+    (1, 3): 1.60,  # H–Li
+    (1, 6): 1.10,  # H–C
+    (1, 8): 0.96,  # H–O
+    (3, 3): 2.67,  # Li–Li
+    (3, 6): 2.10,  # Li–C, approximate
+    (3, 8): 2.00,  # Li–O coordination, approximate
+    (6, 6): 1.54,  # C–C single bond
+    (6, 8): 1.43,  # C–O single bond
+    (8, 8): 1.48,  # O–O single bond
+}
 def read_xyz(filename):
     atoms = np.empty(0,dtype=object)
     numbers = np.empty(0,dtype=np.int32)
@@ -516,9 +528,143 @@ def calc_metadynamics_bondsnorm(natoms,numbers,masses,coords,refcoords,refcount,
     return (0.496147525704 * force)/ (masses[:,None])#*natoms)
 
 
+
+
+def calc_sprint(natoms,numbers,masses,coords,exclude_atom=[]):
+    if len(exclude_atom) > 0:
+        exclude_atom.sort(reverse=True)
+        natoms -= len(exclude_atom)
+        for ex in exclude_atom:
+            masses = np.delete(masses,ex)
+            coords = np.delete(coords,ex,axis=0)
+            numbers = np.delete(numbers,ex)
+    n = 6
+    m = 12
+    x = coords # no need for conversion in Bohr due to r_ij/r_0
+    acc = np.zeros((natoms, 3),dtype=np.float32)
+    force = np.zeros((natoms, 3),dtype=np.float32)
+    a = np.zeros((natoms, natoms),dtype=np.float32)     # adjacency matrix a_ij
+    # print(r0[tuple(sorted((numbers[0],numbers[1])))])
+    # print(np.linalg.norm(x[0]-x[1]))
+    # print( 1 / (1-(np.linalg.norm(x[0]-x[1])/r0[tuple(sorted((numbers[0],numbers[1])))])**n)    )
+    for i in range(natoms):
+        for j in range(natoms):
+            if i == j: continue
+            # print(numbers[i])
+            # print(numbers[j])
+            # # print(sorted(2,1))
+            a[i][j] = (
+                        (1-(np.linalg.norm(x[i]-x[j])/r0[tuple(sorted((numbers[i],numbers[j])))])**n) 
+                         /
+                        (1-(np.linalg.norm(x[i]-x[j])/r0[tuple(sorted((numbers[i],numbers[j])))])**m)
+                      )
+            #a[i][j] = 1 / (1-(np.linalg.norm(x[i]-x[j])/r0[tuple(sorted((numbers[i],numbers[j])))])**m)
+    # with np.printoptions(precision=4, suppress=True, linewidth=200):
+    #     print(a)
+    eigenvalue, eigenvector = np.linalg.eigh(a)
+    lambda_max = eigenvalue[-1]
+   
+    v_max = np.abs(eigenvector[:,-1])
+    # with np.printoptions(precision=4, suppress=True, linewidth=200):
+    #     print(v_max)
+    #     print(lambda_max)
+    sprint = np.sqrt(natoms) * lambda_max * v_max
+
+    return sprint, eigenvalue, eigenvector
+
+
+def calc_metadynamics_sprint(natoms,numbers,masses,coords,refcoords,refcount,kpush,alpha,exclude_atom,sprint_list):
+    if len(exclude_atom) > 0:
+            exclude_atom.sort(reverse=True)
+            natoms -= len(exclude_atom)
+            for ex in exclude_atom:
+                masses = np.delete(masses,ex)
+                coords = np.delete(coords,ex,axis=0)
+                numbers = np.delete(numbers,ex)
+    n = 6
+    m = 12
+    x = coords / BOHR_TO_ANGSTROM   #convert to Bohr
+    delta_sqrt = 0
+    acc = np.zeros((natoms, 3),dtype=np.float32)
+    force = np.zeros((natoms, 3),dtype=np.float32)
+    # a_dev = np.zeros((natoms, natoms),dtype=np.float32)
+    # Calculate Sprint Derivatives : dS_i / da_JK 
+    a_dev = np.zeros((natoms,natoms,3),dtype=np.float32)
+    sprint_dev = np.zeros((natoms,natoms,natoms),dtype=np.float32)   # first index sprint_i second and third for a_jk
+    
+    lambda_dev = {}
+    v_dev = {}
+    
+    sprint, eigenvalue, eigenvector = calc_sprint(natoms,numbers,masses,coords)
+    lambda_max = eigenvalue[-1]
+    lambda_other = eigenvalue[:-1]
+    v_max = np.abs(eigenvector[:,-1])
+    v_other = eigenvector[:,:-1]
+    for j in range(natoms):
+        for k in range(j):
+            delta_pos = x[j] - x[k]
+            distance = np.linalg.norm(delta_pos)
+
+            r0_jk = r0[tuple(sorted((numbers[j],numbers[k])))] / BOHR_TO_ANGSTROM
+            q = distance / r0_jk
+            a_dev[j,k] =(
+                            (
+                                m * q**(m - 1) * (1.0 - q**n)
+                                - n * q**(n - 1) * (1.0 - q**m)
+                            ) / (r0_jk * (1.0 - q**m)**2) 
+                        ) * (delta_pos/distance)
+            lambda_dev[(j,k)]=2* v_max[j] * v_max[k]
+            v_dev[(j,k)] = v_other @  (
+                                        (v_other[j,:] * v_max[k] + v_other[k,:] * v_max[j])
+                                        / (lambda_max - lambda_other)
+                                    )
+            
+            sprint_dev[:,j,k] = np.sqrt(natoms) *   (
+                                                        v_max * lambda_dev[(j,k)] + lambda_max * v_dev[(j,k)]
+                                                    )
+    
+    order = np.arange(natoms)
+    for i in range(len(refcoords)):
+        sprint_ref = sprint_list[i][:]
+        sprint_sorted = sprint.copy()
+        sprint_ref_sorted = sprint.copy()
+        for Z in np.unique(numbers):
+            mask = numbers == Z
+            sprint_sorted[mask] = np.sort(sprint[mask])
+            sprint_ref_sorted[mask] = np.sort(sprint_ref[mask])
+            idx = np.flatnonzero(numbers == Z)
+            order[idx] = idx[np.argsort(sprint[idx])]
+        delta = sprint_sorted - sprint_ref_sorted
+        delta_sqrt = np.dot(delta,delta)
+    
+        dgauß_dsprint_sorted =  -kpush * alpha * delta * np.exp(-alpha * delta_sqrt)    ## dG/dS_i  sorted declining
+        dgauß_dsprint = np.empty_like(dgauß_dsprint_sorted) 
+        dgauß_dsprint[order] = dgauß_dsprint                                            ## dG/dS_I original order
+        for j in range(natoms):
+            for k in range(j):
+                for l in range(natoms):
+                    force[j] += -dgauß_dsprint[l] * a_dev[j,k]
+                    force[k] -= -dgauß_dsprint[l] * a_dev[j,k]
+
+        with np.printoptions(precision=4, suppress=True, linewidth=200):
+            print(force[:])
+            # print(a_dev[:,:,0])
+            # print(sprint_dev[:,1,0])
+        # print(v_max)
+        # print(lambda_max)
+    acc = 0.496147525704 * force / masses[:,None]
+    if len(exclude_atom) > 0:
+            exclude_atom.sort()
+            for ex in exclude_atom:
+                acc = np.insert(acc, ex,np.array([[float(0),float(0),float(0)]]),axis=0)
+     
+    return acc, delta_sqrt
+
+
 def read_input_file(input_file):
     coord_file = ""
     ref_coord_files = []
+    save = 0
     kpush = 0.0
     alpha = 0.0
     kpush_perm = 0.0
@@ -539,6 +685,8 @@ def read_input_file(input_file):
                     grad_calc = value.strip()
                 case "ref_coord":
                     ref_coord_files = value.split()
+                case "save":
+                    save = int(value.strip())    
                 case "kpush":
                     kpush = float(value.strip())
                 case "alpha":
@@ -551,7 +699,7 @@ def read_input_file(input_file):
                     raise ValueError(f"Unknown input keyword: {key}")
 
 
-    return (coord_file, grad_calc, ref_coord_files, kpush, alpha, kpush_perm, alpha_perm)
+    return (coord_file, grad_calc, ref_coord_files, save, kpush, alpha, kpush_perm, alpha_perm)
             
 
 if __name__ == "__main__":
@@ -564,7 +712,7 @@ if __name__ == "__main__":
         help="Path to the input file.",
     )
     args = parser.parse_args()
-    coord_file, grad_calc, ref_coord_files, kpush, alpha, kpush_perm, alpha_perm=read_input_file(args.input)
+    coord_file, grad_calc, ref_coord_files,save, kpush, alpha, kpush_perm, alpha_perm=read_input_file(args.input)
     print(coord_file, ref_coord_files, kpush, alpha, kpush_perm, alpha_perm)
 
 
@@ -572,7 +720,7 @@ if __name__ == "__main__":
     
     charge = 0                  # Charge
     multi = 2                   # Multiplicity
-    ntime = 60000               # Number of time steps
+    ntime = 2000               # Number of time steps
     dump = 20                   # Print trajectory xyz after nth step
     dt = 0.5                    # Time step in fs
 
@@ -585,11 +733,11 @@ if __name__ == "__main__":
     beta = 6.0 / 0.529177       # steepness of confining potential, converted form Bohrs (xtb) to A
 
     tau = 2000                  # Add Metadynamics reference structure each n-th step
-    save = 5                   # Maximum images for Metadynamics
+    # save = 5                   # Maximum images for Metadynamics
     #kpush = 0.1                 # Height of Gaussian in Hartree, this is not converted to SI units for reasons of convenience
     #alpha = 0.6                 # Width of Gaussian in Bohr^{-2}, this is not converted to A for reasons of convenience
     exclude_atom = [10]#[0,2,3,6,7,8,9,10]         # list of atom numbers excluded in RMSD potential (0 for the first atom)
-    run_equi = True
+    run_equi = False
     ntime_equi = 500
     #refcoords_xyz = ["fb_0.xyz"]
     #kpush_perm = 0.5
@@ -612,6 +760,7 @@ if __name__ == "__main__":
         refcoords_perm = np.append(refcoords_perm, np.array([coord]),axis=0)
     pairs_list=[]
     pairs_list_perm=[]
+    sprint_list=[]
 
     for coords_perm in refcoords_perm:
         pairs_list_perm.append(calc_pairs(natoms, coords_perm, exclude_atom))
@@ -620,7 +769,7 @@ if __name__ == "__main__":
     refcount = np.empty(0,dtype=np.int32)
     vels = get_initial_velocities(natoms,masses,temp)
     elapsed_module = 0
-
+    
     # Gradient Calculation
     if grad_calc == "XTB":
         calc = Calculator(
@@ -726,8 +875,12 @@ if __name__ == "__main__":
                 refcount = np.delete(refcount,0)
             refcoords = np.append(refcoords,np.array([coords]),axis=0)
             refcount = np.append(refcount,np.array(0))
-            pairs_list.append(calc_pairs(natoms, coords, exclude_atom))
-            #print(pairs_list)
+            #pairs_list.append(calc_pairs(natoms, coords, exclude_atom))
+            sprint,_,_ = calc_sprint(natoms,numbers,masses,coords,exclude_atom)
+            sprint_list.append(sprint)
+            # with np.printoptions(precision=3, suppress=True, linewidth=200):
+            #     print(sprint_list)
+            # exit()
         # 1. Update half-step velocities
         vels = update_velocities(vels,accs,dt)
         # 2. Update positions
@@ -763,7 +916,8 @@ if __name__ == "__main__":
                 + calc_metadynamics_rmsd(natoms,numbers,masses,coords,refcoords,refcount,kpush,alpha,exclude_atom,refcoords_perm,kpush_perm,alpha_perm)
             vels = update_velocities(vels,accs,dt)
         else:
-            accs, delta, delta_perm = calc_metadynamics_bonds(natoms,numbers,masses,coords,refcoords,refcount,kpush,alpha,pairs_list,refcoords_perm,kpush_perm,alpha_perm,pairs_list_perm) 
+            #accs, delta, delta_perm = calc_metadynamics_bonds(natoms,numbers,masses,coords,refcoords,refcount,kpush,alpha,pairs_list,refcoords_perm,kpush_perm,alpha_perm,pairs_list_perm) 
+            accs, delta = calc_metadynamics_sprint(natoms,numbers,masses,coords,refcoords,refcount,kpush,alpha,exclude_atom,sprint_list)
             accs += get_acceleration(forces,masses) \
                  + calc_confinement(natoms,coords,masses,rsphere,beta,confining_temp) 
                 #+ calc_metadynamics_rmsd(natoms,numbers,masses,coords,refcoords,refcount,kpush,alpha,exclude_atom,refcoords_perm,kpush_perm,alpha_perm)
@@ -780,7 +934,7 @@ if __name__ == "__main__":
                 f"Total timings  = {elapsed:10.3f} s | "
                 f"Module timings  = {elapsed_module:10.3f} s | "
                 f"delta = {delta:10.3f}  | "
-                f"delta_perm = {delta_perm:10.3f}  | "
+                #f"delta_perm = {delta_perm:10.3f}  | "
                 )
             start = time.perf_counter()
             elapsed_module = 0
