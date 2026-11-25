@@ -580,8 +580,8 @@ def calc_metadynamics_sprint(natoms,numbers,masses,coords,refcoords,refcount,kpu
     a_dev = np.zeros((natoms,natoms,3),dtype=np.float32)
     sprint_dev = np.zeros((natoms,natoms,natoms),dtype=np.float32)   # first index sprint_i second and third for a_jk
     
-    lambda_dev = {}
-    v_dev = {}
+    lambda_dev = 0
+    v_dev = 0
     
     sprint, eigenvalue, eigenvector = calc_sprint(natoms,numbers,masses,coords)
     lambda_max = eigenvalue[-1]
@@ -601,18 +601,19 @@ def calc_metadynamics_sprint(natoms,numbers,masses,coords,refcoords,refcount,kpu
                                 - n * q**(n - 1) * (1.0 - q**m)
                             ) / (r0_jk * (1.0 - q**m)**2) 
                         ) * (delta_pos/distance)
-            lambda_dev[(j,k)]=2* v_max[j] * v_max[k]
-            v_dev[(j,k)] = v_other @  (
+            lambda_dev = 2* v_max[j] * v_max[k]
+            v_dev= v_other @  (
                                         (v_other[j,:] * v_max[k] + v_other[k,:] * v_max[j])
                                         / (lambda_max - lambda_other)
                                     )
             
             sprint_dev[:,j,k] = np.sqrt(natoms) *   (
-                                                        v_max * lambda_dev[(j,k)] + lambda_max * v_dev[(j,k)]
+                                                        v_max * lambda_dev + lambda_max * v_dev
                                                     )
     
     order = np.arange(natoms)
     for i in range(len(refcoords)):
+        fac = 2.0 / ( 1.0 + np.exp(-0.03*refcount[i]) ) - 1.0
         sprint_ref = sprint_list[i][:]
         sprint_sorted = sprint.copy()
         sprint_ref_sorted = sprint.copy()
@@ -625,12 +626,12 @@ def calc_metadynamics_sprint(natoms,numbers,masses,coords,refcoords,refcount,kpu
         delta = sprint_sorted - sprint_ref_sorted
         delta_sqrt = np.dot(delta,delta)
     
-        dgauß_dsprint_sorted =  -2.0 * kpush * alpha * delta * np.exp(-alpha * delta_sqrt)    ## dG/dS_i  sorted declining
+        dgauß_dsprint_sorted =  -2.0 * fac * kpush * alpha * delta * np.exp(-alpha * delta_sqrt)    ## dG/dS_i  sorted declining
         dgauß_dsprint = np.empty_like(dgauß_dsprint_sorted) 
         dgauß_dsprint[order] = dgauß_dsprint_sorted                                            ## dG/dS_I original order
         for j in range(natoms):
             for k in range(j):
-                pair_force = -(dgauß_dsprint @ sprint_dev[:, j, k]) * a_dev[j, k]
+                pair_force = -(dgauß_dsprint @ sprint_dev[:, j, k]) * a_dev[j, k]               ## sum_i (dG/dS_i * dS_i / da_jk) * da_jk/dr_j
                 force[j] += pair_force
                 force[k] -= pair_force
 
@@ -706,8 +707,9 @@ if __name__ == "__main__":
     thermostat = "B"        # B for Berendsen and L for Langevin
     
     charge = 0                  # Charge
-    multi = 2                   # Multiplicity
-    ntime = 10000               # Number of time steps
+    multi = 3                   # Multiplicity
+    etemp = 2000
+    ntime = 40000               # Number of time steps
     dump = 20                   # Print trajectory xyz after nth step
     dt = 0.5                    # Time step in fs
 
@@ -716,15 +718,15 @@ if __name__ == "__main__":
 
     confining_temp = 1000       # Confining Temp in K
     gamma = 0.1                 # Friction coefficient in 1/fs
-    rsphere = 2.0               # radius of confining sphere in A
+    rsphere = 2.2               # radius of confining sphere in A
     beta = 6.0 / 0.529177       # steepness of confining potential, converted form Bohrs (xtb) to A
 
-    tau = 2000                  # Add Metadynamics reference structure each n-th step
+    tau = 1000                  # Add Metadynamics reference structure each n-th step
     # save = 5                   # Maximum images for Metadynamics
     #kpush = 0.1                 # Height of Gaussian in Hartree, this is not converted to SI units for reasons of convenience
     #alpha = 0.6                 # Width of Gaussian in Bohr^{-2}, this is not converted to A for reasons of convenience
-    exclude_atom = [10]#[0,2,3,6,7,8,9,10]         # list of atom numbers excluded in RMSD potential (0 for the first atom)
-    run_equi = False
+    exclude_atom = [10,21]#[0,2,3,6,7,8,9,10]         # list of atom numbers excluded in RMSD potential (0 for the first atom)
+    run_equi = True
     ntime_equi = 500
     #refcoords_xyz = ["fb_0.xyz"]
     #kpush_perm = 0.5
@@ -768,7 +770,7 @@ if __name__ == "__main__":
                 )
         calc.set_verbosity(VERBOSITY_MUTED)
         calc.set_accuracy(1.0)
-        calc.set_electronic_temperature(6000.0)
+        calc.set_electronic_temperature(etemp)
         forces, result = calc_xtb_gradients(coords,calc,0)
     if grad_calc == "GXTB":
         forces, energy = calc_gxtb_gradients(
@@ -778,7 +780,7 @@ if __name__ == "__main__":
             multi=multi,
             executable=gxtb_path,
             ncores=XTB_CORES,
-            electronic_temperature=6000.0,
+            electronic_temperature=etemp,
             workdir="gxtb_run",
         )
     if grad_calc == "ORCA":
@@ -812,7 +814,7 @@ if __name__ == "__main__":
                     multi=multi,
                     executable=gxtb_path,
                     ncores=XTB_CORES,
-                    electronic_temperature=6000.0,
+                    electronic_temperature=etemp,
                     workdir="gxtb_run",
                 )
             if grad_calc == "ORCA":
@@ -852,7 +854,6 @@ if __name__ == "__main__":
             f"Equilibration timings = {elapsed_equi:10.3f} s"
         )
     
-    
 
     # Metadynamics Loop
     for t in range(ntime):
@@ -860,6 +861,7 @@ if __name__ == "__main__":
             while len(refcoords) >= save:
                 refcoords = np.delete(refcoords,0,axis=0)
                 refcount = np.delete(refcount,0)
+                sprint_list.pop(0)
             refcoords = np.append(refcoords,np.array([coords]),axis=0)
             refcount = np.append(refcount,np.array(0))
             #pairs_list.append(calc_pairs(natoms, coords, exclude_atom))
@@ -884,7 +886,7 @@ if __name__ == "__main__":
                 multi=multi,
                 executable=gxtb_path,
                 ncores=XTB_CORES,
-                electronic_temperature=6000.0,
+                electronic_temperature=etemp,
                 workdir="gxtb_run",
             )
         if grad_calc == "ORCA":
