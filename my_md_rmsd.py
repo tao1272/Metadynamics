@@ -561,7 +561,7 @@ def calc_sprint(natoms,numbers,masses,coords,exclude_atom=[]):
     return sprint, eigenvalue, eigenvector
 
 
-def calc_metadynamics_sprint(natoms,numbers,masses,coords,refcoords,refcount,kpush,alpha,exclude_atom,sprint_list):
+def calc_metadynamics_sprint(natoms,numbers,masses,coords,refcoords,refcount,kpush,alpha,exclude_atom,sprint_list,sprint_list_perm):
     if len(exclude_atom) > 0:
             exclude_atom.sort(reverse=True)
             natoms -= len(exclude_atom)
@@ -640,6 +640,29 @@ def calc_metadynamics_sprint(natoms,numbers,masses,coords,refcoords,refcount,kpu
             # print(a_dev[:,:,0])
             # print(sprint_dev[:,1,0])
 
+    for i in range(len(sprint_list_perm)):
+            # fac = 2.0 / ( 1.0 + np.exp(-0.03*refcount[i]) ) - 1.0
+            sprint_ref = sprint_list_perm[i][:]
+            sprint_sorted = sprint.copy()
+            sprint_ref_sorted = sprint.copy()
+            for Z in np.unique(numbers):
+                mask = numbers == Z
+                sprint_sorted[mask] = np.sort(sprint[mask])
+                sprint_ref_sorted[mask] = np.sort(sprint_ref[mask])
+                idx = np.flatnonzero(numbers == Z)
+                order[idx] = idx[np.argsort(sprint[idx])]
+            delta = sprint_sorted - sprint_ref_sorted
+            delta_sqrt_perm = np.dot(delta,delta)
+        
+            dgauß_dsprint_sorted =  -2.0 * fac * kpush * alpha * delta * np.exp(-alpha * delta_sqrt_perm)    ## dG/dS_i  sorted declining
+            dgauß_dsprint = np.empty_like(dgauß_dsprint_sorted) 
+            dgauß_dsprint[order] = dgauß_dsprint_sorted                                            ## dG/dS_I original order
+            for j in range(natoms):
+                for k in range(j):
+                    pair_force = -(dgauß_dsprint @ sprint_dev[:, j, k]) * a_dev[j, k]               ## sum_i (dG/dS_i * dS_i / da_jk) * da_jk/dr_j
+                    force[j] += pair_force
+                    force[k] -= pair_force
+            
     acc = 0.496147525704 * force / masses[:,None]
     if len(exclude_atom) > 0:
             exclude_atom.sort()
@@ -707,7 +730,7 @@ if __name__ == "__main__":
     thermostat = "B"        # B for Berendsen and L for Langevin
     
     charge = 0                  # Charge
-    multi = 3                   # Multiplicity
+    multi = 2                   # Multiplicity
     etemp = 2000
     ntime = 40000               # Number of time steps
     dump = 20                   # Print trajectory xyz after nth step
@@ -718,14 +741,14 @@ if __name__ == "__main__":
 
     confining_temp = 1000       # Confining Temp in K
     gamma = 0.1                 # Friction coefficient in 1/fs
-    rsphere = 2.2               # radius of confining sphere in A
+    rsphere = 2.0              # radius of confining sphere in A
     beta = 6.0 / 0.529177       # steepness of confining potential, converted form Bohrs (xtb) to A
 
-    tau = 1000                  # Add Metadynamics reference structure each n-th step
+    tau = 2000                  # Add Metadynamics reference structure each n-th step
     # save = 5                   # Maximum images for Metadynamics
     #kpush = 0.1                 # Height of Gaussian in Hartree, this is not converted to SI units for reasons of convenience
     #alpha = 0.6                 # Width of Gaussian in Bohr^{-2}, this is not converted to A for reasons of convenience
-    exclude_atom = [10,21]#[0,2,3,6,7,8,9,10]         # list of atom numbers excluded in RMSD potential (0 for the first atom)
+    exclude_atom = [10]#[6,7,8,9,10]#[0,2,3,6,7,8,9,10]         # list of atom numbers excluded in RMSD potential (0 for the first atom)
     run_equi = True
     ntime_equi = 500
     #refcoords_xyz = ["fb_0.xyz"]
@@ -739,7 +762,28 @@ if __name__ == "__main__":
     #orca_path = "/Applic.HPC/Easybuild/zen4/2023b/software/ORCA/6.0.1-gompi-2023b-avx2/bin/"
     
     gxtb_path = "/usr/qc/xtb-6.7.1_gxtb/bin/xtb"
-    
+    # gxtb_path = "/Users/twang2/opt/gxtb-2.0.1/xtb-bleed-macos-arm64/bin/xtb"
+
+    print(
+    "\nMD settings\n"
+    "----------------------------------------------\n"
+    f"{'Charge':<28} {charge:>10d}\n"
+    f"{'Multiplicity':<28} {multi:>10d}\n"
+    f"{'Electronic temperature':<28} {etemp:>10g} K\n"
+    f"{'Number of steps':<28} {ntime:>10,d}\n"
+    f"{'Time step':<28} {dt:>10g} fs\n"
+    f"{'Total simulation time':<28} {ntime * dt / 1000:>10.2f} ps\n"
+    f"{'Save frame every':<28} {dump:>10d} steps ({dump * dt:g} fs)\n"
+    f"{'Target temperature':<28} {temp:>10.1f} K\n"
+    f"{'Berendsen tau_T':<28} {tau_T:>10g} fs\n"
+    "\nConfinement\n"
+    "----------------------------------------------\n"
+    f"{'Confining temperature':<28} {confining_temp:>10g} K\n"
+    f"{'Friction coefficient':<28} {gamma:>10g} fs⁻¹\n"
+    f"{'Sphere radius':<28} {rsphere:>10.2f} Å\n"
+    f"{'Wall steepness (beta)':<28} {beta:>10.4f} Å⁻¹\n"
+    f"{'tau':<28} {tau:>10g}"
+)
     start_program = time.perf_counter()
     atoms,numbers,masses,coords = read_xyz(coord_file)
     natoms = len(atoms)
@@ -750,9 +794,12 @@ if __name__ == "__main__":
     pairs_list=[]
     pairs_list_perm=[]
     sprint_list=[]
+    sprint_list_perm=[]
 
     for coords_perm in refcoords_perm:
         pairs_list_perm.append(calc_pairs(natoms, coords_perm, exclude_atom))
+        sprint,_,_ = calc_sprint(natoms,numbers,masses,coords_perm,exclude_atom)
+        sprint_list_perm.append(sprint)
     coords -= calc_center_of_mass(atoms,coords)
     refcoords = np.empty((0,natoms,3),dtype=np.float32)
     refcount = np.empty(0,dtype=np.int32)
@@ -862,9 +909,10 @@ if __name__ == "__main__":
                 refcoords = np.delete(refcoords,0,axis=0)
                 refcount = np.delete(refcount,0)
                 sprint_list.pop(0)
+                pairs_list.pop(0)
             refcoords = np.append(refcoords,np.array([coords]),axis=0)
             refcount = np.append(refcount,np.array(0))
-            #pairs_list.append(calc_pairs(natoms, coords, exclude_atom))
+            pairs_list.append(calc_pairs(natoms, coords, exclude_atom))
             sprint,_,_ = calc_sprint(natoms,numbers,masses,coords,exclude_atom)
             sprint_list.append(sprint)
             # with np.printoptions(precision=3, suppress=True, linewidth=200):
@@ -906,7 +954,7 @@ if __name__ == "__main__":
             vels = update_velocities(vels,accs,dt)
         else:
             #accs, delta, delta_perm = calc_metadynamics_bonds(natoms,numbers,masses,coords,refcoords,refcount,kpush,alpha,pairs_list,refcoords_perm,kpush_perm,alpha_perm,pairs_list_perm) 
-            accs, delta = calc_metadynamics_sprint(natoms,numbers,masses,coords,refcoords,refcount,kpush,alpha,exclude_atom,sprint_list)
+            accs, delta = calc_metadynamics_sprint(natoms,numbers,masses,coords,refcoords,refcount,kpush,alpha,exclude_atom,sprint_list,sprint_list_perm)
             accs += get_acceleration(forces,masses) \
                  + calc_confinement(natoms,coords,masses,rsphere,beta,confining_temp) 
                 #+ calc_metadynamics_rmsd(natoms,numbers,masses,coords,refcoords,refcount,kpush,alpha,exclude_atom,refcoords_perm,kpush_perm,alpha_perm)

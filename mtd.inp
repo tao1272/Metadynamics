@@ -1,8 +1,8 @@
 coord = ec_li.xyz
-#ref_coord =  fb_0.xyz #fb_1.xyz  
+#ref_coord =  fb_3.xyz #fb_2.xyz #fb_1.xyz  
 grad_calc = XTB
 save = 10
-kpush = 0.08
+kpush = 0.15
 alpha = 0.7
-kpush_perm = 0.1
-alpha_perm = 1.0
+kpush_perm = 0.5
+alpha_perm = 0.8
